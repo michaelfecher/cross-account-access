@@ -1,0 +1,19 @@
+# Processed by dev at 2025-01-18T10:00:05.123Z
+# Source: input/test-1737194400.txt
+
+This is a test file for cross-account EventBridge processing.
+
+Timestamp: 2025-01-18T10:00:00Z
+Test ID: manual-test-001
+
+This file should trigger:
+1. S3 Object Created event in Core Account
+2. EventBridge rule in Core Account
+3. Cross-account event delivery to RPS Account
+4. EventBridge rule in RPS Account
+5. SQS message in RPS Account
+6. Lambda processing in RPS Account
+7. Processed output written back to Core Account S3
+
+If you can read this in the output/ prefix with processing metadata,
+the entire cross-account flow is working correctly!

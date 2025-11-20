@@ -3,6 +3,8 @@
 # Configuration script for debugging cross-account event flow
 # Source this file before running other debug scripts
 #
+# Compatible with both bash and zsh
+#
 # Usage:
 #   # Option 1: Using AWS SSO profiles
 #   export CORE_PROFILE=core-account
@@ -16,8 +18,6 @@
 #   export AWS_SESSION_TOKEN=...  # if using temporary credentials
 #   # Run Core account checks, then switch to RPS credentials
 #
-
-set -e
 
 # === Required Configuration ===
 export PREFIX="${PREFIX:-dev}"
@@ -64,8 +64,8 @@ aws_rps() {
   fi
 }
 
-export -f aws_core
-export -f aws_rps
+# Note: Functions are available in current shell after sourcing
+# No need to export in zsh/bash when sourcing
 
 # === Display Configuration ===
 echo "=== Debug Configuration ==="

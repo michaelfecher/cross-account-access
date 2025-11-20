@@ -2,18 +2,16 @@
 #
 # Upload a test file and monitor the event flow
 #
-# Prerequisites: Source 00-config.sh first
-#
 # Usage:
-#   source debug/00-config.sh
 #   bash debug/04-test-upload.sh [filename]
 
 set -e
 
-if [ -z "$PREFIX" ]; then
-  echo "Error: Configuration not loaded. Run: source debug/00-config.sh"
-  exit 1
-fi
+# Get the directory where this script is located
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Source the configuration
+source "$SCRIPT_DIR/00-config.sh"
 
 # Use provided filename or generate one
 FILENAME="${1:-test-$(date +%s).txt}"

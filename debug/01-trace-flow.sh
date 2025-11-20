@@ -3,18 +3,20 @@
 # End-to-end flow tracing for cross-account event delivery
 # Checks metrics at each step to identify where events are getting stuck
 #
-# Prerequisites: Source 00-config.sh first
-#
 # Usage:
-#   source debug/00-config.sh
+#   bash debug/01-trace-flow.sh
+#
+# Or with custom config:
+#   export PREFIX=dev CORE_ACCOUNT_ID=... RPS_ACCOUNT_ID=...
 #   bash debug/01-trace-flow.sh
 
 set -e
 
-if [ -z "$PREFIX" ]; then
-  echo "Error: Configuration not loaded. Run: source debug/00-config.sh"
-  exit 1
-fi
+# Get the directory where this script is located
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Source the configuration
+source "$SCRIPT_DIR/00-config.sh"
 
 echo "=========================================="
 echo "Cross-Account Event Flow Tracing"

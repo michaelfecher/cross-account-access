@@ -2,18 +2,16 @@
 #
 # Check Core Account resources and configuration
 #
-# Prerequisites: Source 00-config.sh first
-#
 # Usage:
-#   source debug/00-config.sh
 #   bash debug/02-check-core.sh
 
 set -e
 
-if [ -z "$PREFIX" ]; then
-  echo "Error: Configuration not loaded. Run: source debug/00-config.sh"
-  exit 1
-fi
+# Get the directory where this script is located
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Source the configuration
+source "$SCRIPT_DIR/00-config.sh"
 
 echo "=========================================="
 echo "Core Account Resources Check"

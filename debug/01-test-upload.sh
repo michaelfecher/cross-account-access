@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 #
 # Upload a test file and monitor the event flow
+# START HERE - This is the first script to run for debugging
 #
 # Usage:
-#   bash debug/04-test-upload.sh [filename]
+#   bash debug/01-test-upload.sh [filename]
 
 set -e
 
@@ -68,7 +69,7 @@ else
   echo ""
 
   # Run flow tracing
-  bash "$(dirname "$0")/01-trace-flow.sh"
+  bash "$SCRIPT_DIR/02-trace-flow.sh"
 
   echo ""
   echo "Additional checks:"
@@ -107,9 +108,10 @@ else
   echo "  1. Review flow trace above to identify which step failed"
   echo "  2. Check Lambda logs: aws logs tail /aws/lambda/$LAMBDA_NAME --follow"
   echo "  3. Run detailed checks:"
-  echo "     - bash debug/02-check-core.sh"
-  echo "     - bash debug/03-check-rps.sh"
-  echo "     - bash debug/05-check-policies.sh"
+  echo "     - bash debug/02-trace-flow.sh   (run again for latest metrics)"
+  echo "     - bash debug/03-check-core.sh   (if Step 1 or 2 failed)"
+  echo "     - bash debug/04-check-rps.sh    (if Step 2, 3, or 4 failed)"
+  echo "     - bash debug/05-check-policies.sh (verify all permissions)"
 fi
 
 echo ""

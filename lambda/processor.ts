@@ -4,6 +4,8 @@ import { S3Client, GetObjectCommand, PutObjectCommand } from '@aws-sdk/client-s3
 const s3Client = new S3Client({});
 const BUCKET_NAME = process.env.BUCKET_NAME!;
 const PREFIX = process.env.PREFIX!;
+const INPUT_PREFIX = process.env.INPUT_PREFIX || 'input/';
+const OUTPUT_PREFIX = process.env.OUTPUT_PREFIX || 'output/';
 
 interface S3EventDetail {
   bucket: {
@@ -59,8 +61,8 @@ async function processRecord(record: SQSRecord): Promise<void> {
   const { bucket, object } = eventBridgeEvent.detail;
   const sourceKey = object.key;
 
-  if (!sourceKey.startsWith('input/')) {
-    console.warn(`Skipping object not in input/ prefix: ${sourceKey}`);
+  if (!sourceKey.startsWith(INPUT_PREFIX)) {
+    console.warn(`Skipping object not in ${INPUT_PREFIX} prefix: ${sourceKey}`);
     return;
   }
 
@@ -86,8 +88,8 @@ async function processRecord(record: SQSRecord): Promise<void> {
   // Process the file (simple transformation example)
   const processedContent = processFileContent(fileContent, sourceKey);
 
-  // Write the processed file to output/ prefix
-  const outputKey = sourceKey.replace('input/', 'output/');
+  // Write the processed file to output prefix
+  const outputKey = sourceKey.replace(INPUT_PREFIX, OUTPUT_PREFIX);
 
   const putObjectCommand = new PutObjectCommand({
     Bucket: BUCKET_NAME,

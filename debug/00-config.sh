@@ -3,6 +3,8 @@
 # Configuration script for debugging cross-account event flow
 # Source this file before running other debug scripts
 #
+# Compatible with both bash and zsh
+#
 # Usage:
 #   # Option 1: Using AWS SSO profiles
 #   export CORE_PROFILE=core-account
@@ -17,21 +19,23 @@
 #   # Run Core account checks, then switch to RPS credentials
 #
 
-set -e
-
 # === Required Configuration ===
-export PREFIX="${PREFIX:-dev}"
+export CDK_DEPLOYMENT_PREFIX="${CDK_DEPLOYMENT_PREFIX:-dev}"
 export REGION="${REGION:-eu-west-1}"
 export CORE_ACCOUNT_ID="${CORE_ACCOUNT_ID:-111111111111}"
 export RPS_ACCOUNT_ID="${RPS_ACCOUNT_ID:-222222222222}"
 
+# === S3 Prefixes (configurable) ===
+export INPUT_PREFIX="${INPUT_PREFIX:-input/}"
+export OUTPUT_PREFIX="${OUTPUT_PREFIX:-output/}"
+
 # === Derived Resource Names ===
-export BUCKET_NAME="${PREFIX}-core-test-bucket-${CORE_ACCOUNT_ID}-${REGION}"
-export QUEUE_NAME="${PREFIX}-processor-queue"
-export LAMBDA_NAME="${PREFIX}-s3-processor"
-export CORE_EVENTBRIDGE_RULE="${PREFIX}-s3-input-events"
-export RPS_EVENTBRIDGE_RULE="${PREFIX}-receive-s3-events"
-export CUSTOM_EVENT_BUS="${PREFIX}-cross-account-bus"
+export BUCKET_NAME="${CDK_DEPLOYMENT_PREFIX}-core-test-bucket-${CORE_ACCOUNT_ID}-${REGION}"
+export QUEUE_NAME="${CDK_DEPLOYMENT_PREFIX}-processor-queue"
+export LAMBDA_NAME="${CDK_DEPLOYMENT_PREFIX}-s3-processor"
+export CORE_EVENTBRIDGE_RULE="${CDK_DEPLOYMENT_PREFIX}-s3-input-events"
+export RPS_EVENTBRIDGE_RULE="${CDK_DEPLOYMENT_PREFIX}-receive-s3-events"
+export CUSTOM_EVENT_BUS="${CDK_DEPLOYMENT_PREFIX}-cross-account-bus"
 
 # === Profile-based vs Environment-based Authentication ===
 # If CORE_PROFILE is set, use --profile flag, otherwise use environment variables
@@ -64,15 +68,15 @@ aws_rps() {
   fi
 }
 
-export -f aws_core
-export -f aws_rps
+# Note: Functions are available in current shell after sourcing
+# No need to export in zsh/bash when sourcing
 
 # === Display Configuration ===
 echo "=== Debug Configuration ==="
-echo "PREFIX:            $PREFIX"
-echo "REGION:            $REGION"
-echo "CORE_ACCOUNT_ID:   $CORE_ACCOUNT_ID"
-echo "RPS_ACCOUNT_ID:    $RPS_ACCOUNT_ID"
+echo "CDK_DEPLOYMENT_PREFIX: $CDK_DEPLOYMENT_PREFIX"
+echo "REGION:                $REGION"
+echo "CORE_ACCOUNT_ID:       $CORE_ACCOUNT_ID"
+echo "RPS_ACCOUNT_ID:        $RPS_ACCOUNT_ID"
 echo ""
 echo "BUCKET_NAME:       $BUCKET_NAME"
 echo "QUEUE_NAME:        $QUEUE_NAME"

@@ -50,9 +50,3 @@ junit.xml
 .cdk.staging/
 .parcel-cache/
 !/.projenrc.ts
-
-# Environment files with credentials
-.env
-
-# Test artifacts
-test*.txt

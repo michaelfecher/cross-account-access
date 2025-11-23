@@ -5,13 +5,13 @@ When no output file is created, check each step in the flow to identify where it
 ## Configuration
 
 ```bash
-export PREFIX=dev
+export CDK_DEPLOYMENT_CDK_DEPLOYMENT_PREFIX=dev
 export CORE_ACCOUNT_ID=111111111111
 export RPS_ACCOUNT_ID=222222222222
 export REGION=eu-west-1
-export BUCKET_NAME=${PREFIX}-core-test-bucket-${CORE_ACCOUNT_ID}-${REGION}
-export QUEUE_NAME=${PREFIX}-processor-queue
-export LAMBDA_NAME=${PREFIX}-s3-processor
+export BUCKET_NAME=${CDK_DEPLOYMENT_PREFIX}-core-test-bucket-${CORE_ACCOUNT_ID}-${REGION}
+export QUEUE_NAME=${CDK_DEPLOYMENT_PREFIX}-processor-queue
+export LAMBDA_NAME=${CDK_DEPLOYMENT_PREFIX}-s3-processor
 ```
 
 ---
@@ -22,7 +22,7 @@ For faster debugging, use the automated scripts in the `debug/` directory:
 
 ```bash
 # 1. Configure and load environment
-export PREFIX=dev
+export CDK_DEPLOYMENT_CDK_DEPLOYMENT_PREFIX=dev
 export CORE_ACCOUNT_ID=111111111111
 export RPS_ACCOUNT_ID=222222222222
 export REGION=eu-west-1
@@ -76,7 +76,7 @@ aws cloudwatch get-metric-data \
     "Id":"triggered",
     "MetricStat":{
       "Metric":{"Namespace":"AWS/Events","MetricName":"TriggeredRules",
-        "Dimensions":[{"Name":"RuleName","Value":"'${PREFIX}'-s3-input-events"}]},
+        "Dimensions":[{"Name":"RuleName","Value":"'${CDK_DEPLOYMENT_PREFIX}'-s3-input-events"}]},
       "Period":60,"Stat":"Sum"}}]' \
   --start-time "$START_TIME" --end-time "$END_TIME" \
   --region ${REGION} --profile core-account \
@@ -89,7 +89,7 @@ aws cloudwatch get-metric-data \
     "Id":"triggered",
     "MetricStat":{
       "Metric":{"Namespace":"AWS/Events","MetricName":"TriggeredRules",
-        "Dimensions":[{"Name":"RuleName","Value":"'${PREFIX}'-receive-s3-events"}]},
+        "Dimensions":[{"Name":"RuleName","Value":"'${CDK_DEPLOYMENT_PREFIX}'-receive-s3-events"}]},
       "Period":60,"Stat":"Sum"}}]' \
   --start-time "$START_TIME" --end-time "$END_TIME" \
   --region ${REGION} --profile rps-account \
@@ -154,13 +154,13 @@ Verify the EventBridge rule exists and has the right pattern:
 ```bash
 # Describe the rule
 aws events describe-rule \
-  --name ${PREFIX}-s3-input-events \
+  --name ${CDK_DEPLOYMENT_PREFIX}-s3-input-events \
   --region ${REGION} \
   --profile core-account
 
 # Check the event pattern
 aws events describe-rule \
-  --name ${PREFIX}-s3-input-events \
+  --name ${CDK_DEPLOYMENT_PREFIX}-s3-input-events \
   --region ${REGION} \
   --profile core-account \
   --query 'EventPattern' \
@@ -168,7 +168,7 @@ aws events describe-rule \
 
 # Check targets
 aws events list-targets-by-rule \
-  --rule ${PREFIX}-s3-input-events \
+  --rule ${CDK_DEPLOYMENT_PREFIX}-s3-input-events \
   --region ${REGION} \
   --profile core-account
 ```
@@ -190,7 +190,7 @@ aws events list-targets-by-rule \
 ```
 
 **Expected Target:**
-- RPS Account custom event bus ARN: `arn:aws:events:eu-west-1:222222222222:event-bus/${PREFIX}-cross-account-bus`
+- RPS Account custom event bus ARN: `arn:aws:events:eu-west-1:222222222222:event-bus/${CDK_DEPLOYMENT_PREFIX}-cross-account-bus`
 
 ---
 
@@ -225,7 +225,7 @@ Verify RPS custom event bus allows Core account to send events:
 ```bash
 # Check custom event bus policy
 aws events describe-event-bus \
-  --name ${PREFIX}-cross-account-bus \
+  --name ${CDK_DEPLOYMENT_PREFIX}-cross-account-bus \
   --region ${REGION} \
   --profile rps-account \
   --query 'Policy' \
@@ -259,15 +259,15 @@ Verify RPS EventBridge rule on the custom event bus is configured correctly:
 ```bash
 # Describe the rule
 aws events describe-rule \
-  --name ${PREFIX}-receive-s3-events \
-  --event-bus-name ${PREFIX}-cross-account-bus \
+  --name ${CDK_DEPLOYMENT_PREFIX}-receive-s3-events \
+  --event-bus-name ${CDK_DEPLOYMENT_PREFIX}-cross-account-bus \
   --region ${REGION} \
   --profile rps-account
 
 # Check event pattern
 aws events describe-rule \
-  --name ${PREFIX}-receive-s3-events \
-  --event-bus-name ${PREFIX}-cross-account-bus \
+  --name ${CDK_DEPLOYMENT_PREFIX}-receive-s3-events \
+  --event-bus-name ${CDK_DEPLOYMENT_PREFIX}-cross-account-bus \
   --region ${REGION} \
   --profile rps-account \
   --query 'EventPattern' \
@@ -275,8 +275,8 @@ aws events describe-rule \
 
 # Check targets
 aws events list-targets-by-rule \
-  --rule ${PREFIX}-receive-s3-events \
-  --event-bus-name ${PREFIX}-cross-account-bus \
+  --rule ${CDK_DEPLOYMENT_PREFIX}-receive-s3-events \
+  --event-bus-name ${CDK_DEPLOYMENT_PREFIX}-cross-account-bus \
   --region ${REGION} \
   --profile rps-account
 ```
@@ -454,7 +454,7 @@ Check if messages failed and went to DLQ:
 ```bash
 # Get DLQ URL
 DLQ_URL=$(aws sqs get-queue-url \
-  --queue-name ${PREFIX}-processor-dlq \
+  --queue-name ${CDK_DEPLOYMENT_PREFIX}-processor-dlq \
   --region ${REGION} \
   --profile rps-account \
   --query 'QueueUrl' \
@@ -602,14 +602,14 @@ Create a catch-all rule to see if events are arriving:
 # Create catch-all rule
 aws events put-rule \
   --name debug-catch-all \
-  --event-bus-name ${PREFIX}-cross-account-bus \
+  --event-bus-name ${CDK_DEPLOYMENT_PREFIX}-cross-account-bus \
   --event-pattern '{"source": [{"prefix": ""}]}' \
   --state ENABLED \
   --profile rps-account
 
 # Create log group
 aws logs create-log-group \
-  --log-group-name /aws/events/${PREFIX}-debug \
+  --log-group-name /aws/events/${CDK_DEPLOYMENT_PREFIX}-debug \
   --profile rps-account
 
 # Add resource policy for EventBridge to write logs
@@ -629,8 +629,8 @@ aws logs put-resource-policy \
 # Add CloudWatch Logs as target
 aws events put-targets \
   --rule debug-catch-all \
-  --event-bus-name ${PREFIX}-cross-account-bus \
-  --targets '[{"Id":"debug-logs","Arn":"arn:aws:logs:'${REGION}':'${RPS_ACCOUNT_ID}':log-group:/aws/events/'${PREFIX}'-debug"}]' \
+  --event-bus-name ${CDK_DEPLOYMENT_PREFIX}-cross-account-bus \
+  --targets '[{"Id":"debug-logs","Arn":"arn:aws:logs:'${REGION}':'${RPS_ACCOUNT_ID}':log-group:/aws/events/'${CDK_DEPLOYMENT_PREFIX}'-debug"}]' \
   --profile rps-account
 
 # Upload test file and check logs
@@ -640,7 +640,7 @@ aws s3 cp test-data/sample-input.txt \
 
 sleep 30
 
-aws logs tail /aws/events/${PREFIX}-debug --profile rps-account
+aws logs tail /aws/events/${CDK_DEPLOYMENT_PREFIX}-debug --profile rps-account
 ```
 
 ### Step B: Check Custom Bus Rule Metrics
@@ -648,7 +648,7 @@ aws logs tail /aws/events/${PREFIX}-debug --profile rps-account
 ```bash
 # Check if rule on custom bus is triggered
 aws cloudwatch get-metric-data \
-  --metric-data-queries '[{"Id":"m1","MetricStat":{"Metric":{"Namespace":"AWS/Events","MetricName":"TriggeredRules","Dimensions":[{"Name":"RuleName","Value":"'${PREFIX}'-receive-s3-events"}]},"Period":60,"Stat":"Sum"}}]' \
+  --metric-data-queries '[{"Id":"m1","MetricStat":{"Metric":{"Namespace":"AWS/Events","MetricName":"TriggeredRules","Dimensions":[{"Name":"RuleName","Value":"'${CDK_DEPLOYMENT_PREFIX}'-receive-s3-events"}]},"Period":60,"Stat":"Sum"}}]' \
   --start-time $(date -u -v-5M +%Y-%m-%dT%H:%M:%SZ) \
   --end-time $(date -u +%Y-%m-%dT%H:%M:%SZ) \
   --profile rps-account
@@ -660,7 +660,7 @@ aws cloudwatch get-metric-data \
 
 ```bash
 aws sqs get-queue-attributes \
-  --queue-url https://sqs.${REGION}.amazonaws.com/${RPS_ACCOUNT_ID}/${PREFIX}-processor-queue \
+  --queue-url https://sqs.${REGION}.amazonaws.com/${RPS_ACCOUNT_ID}/${CDK_DEPLOYMENT_PREFIX}-processor-queue \
   --attribute-names Policy \
   --profile rps-account | jq -r '.Attributes.Policy' | jq .
 ```
@@ -685,15 +685,15 @@ Check the actual event structure vs rule pattern:
 ```bash
 # Get event from debug logs
 aws logs filter-log-events \
-  --log-group-name /aws/events/${PREFIX}-debug \
+  --log-group-name /aws/events/${CDK_DEPLOYMENT_PREFIX}-debug \
   --limit 1 \
   --profile rps-account \
   --query 'events[0].message' --output text | jq '{account, source, "detail-type": ."detail-type"}'
 
 # Compare with rule pattern
 aws events describe-rule \
-  --name ${PREFIX}-receive-s3-events \
-  --event-bus-name ${PREFIX}-cross-account-bus \
+  --name ${CDK_DEPLOYMENT_PREFIX}-receive-s3-events \
+  --event-bus-name ${CDK_DEPLOYMENT_PREFIX}-cross-account-bus \
   --profile rps-account \
   --query 'EventPattern' --output text | jq .
 ```
@@ -705,17 +705,17 @@ After debugging, remove the catch-all rule:
 ```bash
 aws events remove-targets \
   --rule debug-catch-all \
-  --event-bus-name ${PREFIX}-cross-account-bus \
+  --event-bus-name ${CDK_DEPLOYMENT_PREFIX}-cross-account-bus \
   --ids debug-logs \
   --profile rps-account
 
 aws events delete-rule \
   --name debug-catch-all \
-  --event-bus-name ${PREFIX}-cross-account-bus \
+  --event-bus-name ${CDK_DEPLOYMENT_PREFIX}-cross-account-bus \
   --profile rps-account
 
 aws logs delete-log-group \
-  --log-group-name /aws/events/${PREFIX}-debug \
+  --log-group-name /aws/events/${CDK_DEPLOYMENT_PREFIX}-debug \
   --profile rps-account
 ```
 
@@ -763,13 +763,13 @@ echo "=== 1. S3 EventBridge Config ==="
 aws s3api get-bucket-notification-configuration --bucket ${BUCKET_NAME} --profile core-account | jq '.'
 
 echo -e "\n=== 2. Core EventBridge Rule ==="
-aws events describe-rule --name ${PREFIX}-s3-input-events --region ${REGION} --profile core-account
+aws events describe-rule --name ${CDK_DEPLOYMENT_PREFIX}-s3-input-events --region ${REGION} --profile core-account
 
 echo -e "\n=== 3. RPS Custom Event Bus Policy ==="
-aws events describe-event-bus --name ${PREFIX}-cross-account-bus --region ${REGION} --profile rps-account --query 'Policy' --output text | jq '.'
+aws events describe-event-bus --name ${CDK_DEPLOYMENT_PREFIX}-cross-account-bus --region ${REGION} --profile rps-account --query 'Policy' --output text | jq '.'
 
 echo -e "\n=== 4. RPS EventBridge Rule ==="
-aws events describe-rule --name ${PREFIX}-receive-s3-events --event-bus-name ${PREFIX}-cross-account-bus --region ${REGION} --profile rps-account
+aws events describe-rule --name ${CDK_DEPLOYMENT_PREFIX}-receive-s3-events --event-bus-name ${CDK_DEPLOYMENT_PREFIX}-cross-account-bus --region ${REGION} --profile rps-account
 
 echo -e "\n=== 5. SQS Queue Stats ==="
 QUEUE_URL=$(aws sqs get-queue-url --queue-name ${QUEUE_NAME} --region ${REGION} --profile rps-account --query 'QueueUrl' --output text)

@@ -80,7 +80,7 @@ Set the following environment variables before deployment:
 ```bash
 export ACCOUNT_A_ID="111111111111"  # Replace with your Core Account ID
 export ACCOUNT_B_ID="222222222222"  # Replace with your RPS Account ID
-export PREFIX="dev"                  # Deployment instance prefix
+export CDK_DEPLOYMENT_PREFIX="dev"                  # Deployment instance prefix
 ```
 
 ### Multi-Instance Deployment
@@ -176,7 +176,7 @@ Run the comprehensive integration test suite:
 # Set environment variables
 export ACCOUNT_CORE_ID="111111111111"
 export ACCOUNT_RPS_ID="222222222222"
-export PREFIX="dev"
+export CDK_DEPLOYMENT_PREFIX="dev"
 
 # Run integration tests (requires deployed stacks)
 npm test -- test/integration

@@ -163,7 +163,7 @@ Use environment variables to configure different deployments (dev, staging, prod
 
 ```bash
 # Development deployment
-PREFIX=dev ACCOUNT_CORE_ID=111111111111 ACCOUNT_RPS_ID=222222222222 cdk deploy dev-StackCore --profile core-dev
+CDK_DEPLOYMENT_PREFIX=dev ACCOUNT_CORE_ID=111111111111 ACCOUNT_RPS_ID=222222222222 cdk deploy dev-StackCore --profile core-dev
 
 # Staging deployment
 PREFIX=staging ACCOUNT_CORE_ID=333333333333 ACCOUNT_RPS_ID=444444444444 cdk deploy staging-StackCore --profile core-staging

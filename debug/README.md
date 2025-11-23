@@ -34,7 +34,7 @@ Set your environment and source the configuration:
 
 ```bash
 # Required configuration
-export PREFIX=dev
+export CDK_DEPLOYMENT_CDK_DEPLOYMENT_PREFIX=dev
 export REGION=eu-west-1
 export CORE_ACCOUNT_ID=111111111111
 export RPS_ACCOUNT_ID=222222222222
@@ -49,22 +49,47 @@ source debug/00-config.sh
 
 ### Scripts Overview
 
+**Scripts are numbered in the recommended usage order:**
+
 | Script | Purpose | When to Use |
 |--------|---------|-------------|
-| `00-config.sh` | Configuration and setup | **Source this first** before any other script |
-| `01-trace-flow.sh` | End-to-end flow metrics | When output file is not created - identifies which step failed |
-| `02-check-core.sh` | Core account resources | Verify Core account S3, EventBridge, IAM configuration |
-| `03-check-rps.sh` | RPS account resources | Verify RPS account EventBus, SQS, Lambda configuration |
-| `04-test-upload.sh` | Upload test file | Quick end-to-end test with automated troubleshooting |
+| `00-config.sh` | Configuration and setup | Automatically sourced by all other scripts |
+| `01-test-upload.sh` | **START HERE** - Upload test file | Quick end-to-end test with automated troubleshooting |
+| `02-trace-flow.sh` | End-to-end flow metrics | Identifies which step failed (automatically run by 01) |
+| `03-check-core.sh` | Core account resources | Verify Core account S3, EventBridge, IAM (if Step 1-2 failed) |
+| `04-check-rps.sh` | RPS account resources | Verify RPS account EventBus, SQS, Lambda (if Step 2-4 failed) |
 | `05-check-policies.sh` | Cross-account policies | Verify all IAM and resource policies are correct |
 
 ### Quick Start
 
-#### Full Diagnostic Check
+#### Recommended: Start with Test Upload
 
 ```bash
-source debug/00-config.sh
-bash debug/01-trace-flow.sh
+# Set your configuration
+export CDK_DEPLOYMENT_CDK_DEPLOYMENT_PREFIX=dev
+export CORE_ACCOUNT_ID=111111111111
+export RPS_ACCOUNT_ID=222222222222
+export REGION=eu-west-1
+export CORE_PROFILE=core-account
+export RPS_PROFILE=rps-account
+
+# Run the test (automatically sources config)
+bash debug/01-test-upload.sh
+```
+
+**This script will:**
+1. Upload a test file to `input/`
+2. Wait 10 seconds
+3. Check if output file appears in `output/`
+4. **If it fails**: Automatically run flow trace to identify the problem
+5. Show you exactly which step is broken
+
+#### Manual Flow Trace (Optional)
+
+If you already uploaded a file and want to trace what happened:
+
+```bash
+bash debug/02-trace-flow.sh
 ```
 
 This traces the event flow through all steps:
@@ -73,46 +98,37 @@ This traces the event flow through all steps:
 3. SQS messages received
 4. Lambda invocations
 
-#### Test Upload
+#### Detailed Resource Checks (If Test Fails)
 
 ```bash
-source debug/00-config.sh
-bash debug/04-test-upload.sh
-```
+# Check Core account (if Step 1 or 2 failed)
+bash debug/03-check-core.sh
 
-Uploads a test file and automatically checks if output is created. If not, runs flow trace to identify the issue.
+# Check RPS account (if Step 2, 3, or 4 failed)
+bash debug/04-check-rps.sh
 
-#### Detailed Resource Checks
-
-```bash
-source debug/00-config.sh
-
-# Check Core account
-bash debug/02-check-core.sh
-
-# Check RPS account
-bash debug/03-check-rps.sh
-
-# Verify all policies
+# Verify all cross-account policies
 bash debug/05-check-policies.sh
 ```
 
 ### Common Debugging Workflows
 
-#### Scenario 1: No output file created
+#### Scenario 1: No output file created (START HERE)
 
 ```bash
-source debug/00-config.sh
-bash debug/04-test-upload.sh
+bash debug/01-test-upload.sh
 ```
 
-The test script will automatically run flow tracing if the output file is not created.
+The test script will automatically:
+- Upload a file
+- Check for output
+- Run flow tracing if it fails
+- Tell you exactly which step is broken
 
-#### Scenario 2: Identify which step is failing
+#### Scenario 2: Already uploaded file, want to trace what happened
 
 ```bash
-source debug/00-config.sh
-bash debug/01-trace-flow.sh
+bash debug/02-trace-flow.sh
 ```
 
 Look for zeros in the metrics:
@@ -124,7 +140,6 @@ Look for zeros in the metrics:
 #### Scenario 3: Verify policy configuration
 
 ```bash
-source debug/00-config.sh
 bash debug/05-check-policies.sh
 ```
 
@@ -138,13 +153,11 @@ Checks all cross-account policies:
 #### Scenario 4: Deep dive into specific account
 
 ```bash
-source debug/00-config.sh
+# For Core account issues (Step 1 or 2 failed)
+bash debug/03-check-core.sh
 
-# For Core account issues
-bash debug/02-check-core.sh
-
-# For RPS account issues
-bash debug/03-check-rps.sh
+# For RPS account issues (Step 2, 3, or 4 failed)
+bash debug/04-check-rps.sh
 ```
 
 ### Understanding the Event Flow

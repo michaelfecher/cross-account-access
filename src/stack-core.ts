@@ -11,6 +11,7 @@ export interface StackCoreProps extends cdk.StackProps {
   readonly prefix: string;
   readonly accountRpsId: string;
   readonly region: string;
+  readonly inputPrefix?: string;  // S3 prefix for input files (default: 'input/')
 }
 
 export class StackCore extends cdk.Stack {
@@ -20,7 +21,10 @@ export class StackCore extends cdk.Stack {
   constructor(scope: Construct, id: string, props: StackCoreProps) {
     super(scope, id, props);
 
-    const { prefix, accountRpsId, region } = props;
+    const { prefix, accountRpsId, region, inputPrefix = 'input/' } = props;
+
+    // RPS Lambda role ARN - used in bucket and KMS policies
+    const lambdaRoleArn = `arn:aws:iam::${accountRpsId}:role/${prefix}-processor-lambda-role`;
 
     // Create KMS key for S3 bucket encryption with predictable alias
     const bucketKey = new kms.Key(this, 'BucketKey', {
@@ -31,13 +35,13 @@ export class StackCore extends cdk.Stack {
     });
 
     // Grant RPS Account Lambda role access to the KMS key for read and write
-    // Using StringLike condition to allow any *-processor-lambda-role (multi-developer support)
-    // Least-privilege: restricted to specific account + role naming pattern + S3 service only
+    // Least-privilege: restricted to specific Lambda role + S3 service only
+
     bucketKey.addToResourcePolicy(
       new iam.PolicyStatement({
         sid: 'AllowAccountRpsLambdaDecrypt',
         effect: iam.Effect.ALLOW,
-        principals: [new iam.AccountPrincipal(accountRpsId)],
+        principals: [new iam.ArnPrincipal(lambdaRoleArn)],
         actions: [
           'kms:Decrypt',
           'kms:DescribeKey',
@@ -47,9 +51,6 @@ export class StackCore extends cdk.Stack {
         conditions: {
           StringEquals: {
             'kms:ViaService': `s3.${region}.amazonaws.com`,
-          },
-          StringLike: {
-            'aws:PrincipalArn': `arn:aws:iam::${accountRpsId}:role/*-processor-lambda-role`,
           },
         },
       }),
@@ -137,22 +138,16 @@ export class StackCore extends cdk.Stack {
 
     // Grant RPS Account Lambda role access to the bucket
     // Read access to input/* and write access to output/*
-    // Using StringLike with wildcard for multi-developer support
     this.bucket.addToResourcePolicy(
       new iam.PolicyStatement({
         sid: 'AllowAccountRpsLambdaRead',
         effect: iam.Effect.ALLOW,
-        principals: [new iam.AccountPrincipal(accountRpsId)],
+        principals: [new iam.ArnPrincipal(lambdaRoleArn)],
         actions: ['s3:GetObject', 's3:ListBucket'],
         resources: [
           this.bucket.bucketArn,
           `${this.bucket.bucketArn}/input/*`,
         ],
-        conditions: {
-          StringLike: {
-            'aws:PrincipalArn': `arn:aws:iam::${accountRpsId}:role/*-processor-lambda-role`,
-          },
-        },
       }),
     );
 
@@ -160,21 +155,16 @@ export class StackCore extends cdk.Stack {
       new iam.PolicyStatement({
         sid: 'AllowAccountRpsLambdaWrite',
         effect: iam.Effect.ALLOW,
-        principals: [new iam.AccountPrincipal(accountRpsId)],
+        principals: [new iam.ArnPrincipal(lambdaRoleArn)],
         actions: ['s3:PutObject', 's3:PutObjectAcl'],
         resources: [`${this.bucket.bucketArn}/output/*`],
-        conditions: {
-          StringLike: {
-            'aws:PrincipalArn': `arn:aws:iam::${accountRpsId}:role/*-processor-lambda-role`,
-          },
-        },
       }),
     );
 
-    // Create EventBridge rule for S3 ObjectCreated events on input/ prefix
+    // Create EventBridge rule for S3 ObjectCreated events on input prefix
     const s3EventRule = new events.Rule(this, 'S3InputEventRule', {
       ruleName: `${prefix}-s3-input-events`,
-      description: `Captures S3 ObjectCreated events for ${prefix} bucket input/ prefix`,
+      description: `Captures S3 ObjectCreated events for ${prefix} bucket ${inputPrefix} prefix`,
       eventPattern: {
         source: ['aws.s3'],
         detailType: ['Object Created'],
@@ -183,7 +173,7 @@ export class StackCore extends cdk.Stack {
             name: [this.bucket.bucketName],
           },
           object: {
-            key: [{ prefix: 'input/' }],
+            key: [{ prefix: inputPrefix }],
           },
         },
       },

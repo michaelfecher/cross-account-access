@@ -16,17 +16,26 @@ export interface StackRpsProps extends cdk.StackProps {
   readonly accountCoreId: string;
   readonly stackCoreBucketName: string;
   readonly region: string;
+  readonly inputPrefix?: string;   // S3 prefix for input files (default: 'input/')
+  readonly outputPrefix?: string;  // S3 prefix for output files (default: 'output/')
 }
 
 export class StackRps extends cdk.Stack {
   public readonly processorQueue: sqs.IQueue;
   public readonly processorLambda: lambda.IFunction;
-  public readonly eventBus: events.IEventBus;
+  public readonly eventBus: events.EventBus;
 
   constructor(scope: Construct, id: string, props: StackRpsProps) {
     super(scope, id, props);
 
-    const { prefix, accountCoreId, stackCoreBucketName, region } = props;
+    const {
+      prefix,
+      accountCoreId,
+      stackCoreBucketName,
+      region,
+      inputPrefix = 'input/',
+      outputPrefix = 'output/',
+    } = props;
 
     // Create KMS key for SQS encryption
     const queueKey = new kms.Key(this, 'QueueKey', {
@@ -177,6 +186,8 @@ export class StackRps extends cdk.Stack {
       environment: {
         BUCKET_NAME: stackCoreBucketName,
         PREFIX: prefix,
+        INPUT_PREFIX: inputPrefix,
+        OUTPUT_PREFIX: outputPrefix,
         POWERTOOLS_SERVICE_NAME: `${prefix}-processor`,
         LOG_LEVEL: 'INFO',
       },
@@ -233,18 +244,15 @@ export class StackRps extends cdk.Stack {
     );
 
     // Grant Core Account EventBridge permission to put events on custom event bus
-    const eventBusPolicy = new events.CfnEventBusPolicy(this, 'AllowCoreAccountEvents', {
-      eventBusName: this.eventBus.eventBusName,
-      statementId: `AllowCoreAccount-${prefix}`,
-      statement: {
-        Effect: 'Allow',
-        Principal: {
-          AWS: `arn:aws:iam::${accountCoreId}:root`,
-        },
-        Action: 'events:PutEvents',
-        Resource: this.eventBus.eventBusArn,
-      },
-    });
+    this.eventBus.addToResourcePolicy(
+      new iam.PolicyStatement({
+        sid: `AllowCoreAccount-${prefix}`,
+        effect: iam.Effect.ALLOW,
+        principals: [new iam.AccountPrincipal(accountCoreId)],
+        actions: ['events:PutEvents'],
+        resources: [this.eventBus.eventBusArn],
+      }),
+    );
 
     // CDK Nag Suppressions for Lambda Role
     // No IAM4 suppression needed - using inline policy instead of AWS managed policy
@@ -275,7 +283,7 @@ export class StackRps extends cdk.Stack {
 
     // Suppress EVB1 for event bus policy - restricted to specific Core account
     NagSuppressions.addResourceSuppressions(
-      eventBusPolicy,
+      this.eventBus,
       [
         {
           id: 'AwsSolutions-EVB1',

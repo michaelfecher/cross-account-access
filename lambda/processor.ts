@@ -6,6 +6,7 @@ const BUCKET_NAME = process.env.BUCKET_NAME!;
 const PREFIX = process.env.PREFIX!;
 const INPUT_PREFIX = process.env.INPUT_PREFIX || 'input/';
 const OUTPUT_PREFIX = process.env.OUTPUT_PREFIX || 'output/';
+const CDK_DEPLOYMENT_PREFIX = process.env.CDK_DEPLOYMENT_PREFIX; // Optional: for deployment-specific isolation
 
 interface S3EventDetail {
   bucket: {
@@ -61,14 +62,29 @@ async function processRecord(record: SQSRecord): Promise<void> {
   const { bucket, object } = eventBridgeEvent.detail;
   const sourceKey = object.key;
 
-  if (!sourceKey.startsWith(INPUT_PREFIX)) {
-    console.warn(`Skipping object not in ${INPUT_PREFIX} prefix: ${sourceKey}`);
-    return;
+  // Multi-deployment isolation logic
+  if (CDK_DEPLOYMENT_PREFIX) {
+    // WITH deployment prefix: Only process files in input/{deployment}/ subdirectory
+    // Example: CDK_DEPLOYMENT_PREFIX='john' → only process input/john/* files
+    const expectedInputPath = `${INPUT_PREFIX}${CDK_DEPLOYMENT_PREFIX}/`;
+    if (!sourceKey.startsWith(expectedInputPath)) {
+      console.warn(`Skipping object not in ${expectedInputPath}: ${sourceKey}`);
+      return;
+    }
+  } else {
+    // WITHOUT deployment prefix: Only process files DIRECTLY in input/ root
+    // Skip files in subdirectories (e.g., skip input/john/file.txt)
+    // This prevents processing files meant for deployment-specific stacks
+    const relativePath = sourceKey.substring(INPUT_PREFIX.length);
+    if (relativePath.includes('/')) {
+      console.log(`Skipping subdirectory file (no CDK_DEPLOYMENT_PREFIX set): ${sourceKey}`);
+      return;
+    }
   }
 
   console.log(`Processing file: ${sourceKey} from bucket: ${bucket.name}`);
 
-  // Read the file from input/ prefix
+  // Read the file from input prefix
   const getObjectCommand = new GetObjectCommand({
     Bucket: BUCKET_NAME,
     Key: sourceKey,
@@ -89,7 +105,17 @@ async function processRecord(record: SQSRecord): Promise<void> {
   const processedContent = processFileContent(fileContent, sourceKey);
 
   // Write the processed file to output prefix
-  const outputKey = sourceKey.replace(INPUT_PREFIX, OUTPUT_PREFIX);
+  let outputKey: string;
+  if (CDK_DEPLOYMENT_PREFIX) {
+    // WITH deployment prefix: input/john/file.txt → output/john/file.txt
+    outputKey = sourceKey.replace(
+      `${INPUT_PREFIX}${CDK_DEPLOYMENT_PREFIX}/`,
+      `${OUTPUT_PREFIX}${CDK_DEPLOYMENT_PREFIX}/`
+    );
+  } else {
+    // WITHOUT deployment prefix: input/file.txt → output/file.txt
+    outputKey = sourceKey.replace(INPUT_PREFIX, OUTPUT_PREFIX);
+  }
 
   const putObjectCommand = new PutObjectCommand({
     Bucket: BUCKET_NAME,
@@ -98,7 +124,7 @@ async function processRecord(record: SQSRecord): Promise<void> {
     ContentType: response.ContentType || 'text/plain',
     Metadata: {
       sourceKey,
-      processedBy: PREFIX,
+      processedBy: CDK_DEPLOYMENT_PREFIX ? `${PREFIX}-${CDK_DEPLOYMENT_PREFIX}` : PREFIX,
       processedAt: new Date().toISOString(),
     },
   });

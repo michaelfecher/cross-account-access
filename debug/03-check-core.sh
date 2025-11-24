@@ -37,7 +37,7 @@ else
   echo "❌ FAIL: EventBridge notifications NOT enabled"
   echo ""
   echo "SOLUTION: Redeploy Core Stack"
-  echo "  cdk deploy ${CDK_DEPLOYMENT_PREFIX}-StackCore --profile ${CORE_PROFILE:-core-account}"
+  echo "  cdk deploy ${STAGE}-StackCore --profile ${CORE_PROFILE:-core-account}"
   FAILED=1
 fi
 echo ""
@@ -61,7 +61,7 @@ else
   echo "❌ FAIL: Rule state is '$RULE_STATE' (expected ENABLED)"
   echo ""
   echo "SOLUTION: Check if rule exists and redeploy if needed"
-  echo "  cdk deploy ${CDK_DEPLOYMENT_PREFIX}-StackCore --profile ${CORE_PROFILE:-core-account}"
+  echo "  cdk deploy ${STAGE}-StackCore --profile ${CORE_PROFILE:-core-account}"
   FAILED=1
 fi
 echo ""
@@ -94,7 +94,7 @@ else
   echo "  Prefix: $PREFIX_CHECK (expected: $INPUT_PREFIX)"
   echo ""
   echo "SOLUTION: Redeploy Core Stack"
-  echo "  cdk deploy ${CDK_DEPLOYMENT_PREFIX}-StackCore --profile ${CORE_PROFILE:-core-account}"
+  echo "  cdk deploy ${STAGE}-StackCore --profile ${CORE_PROFILE:-core-account}"
   FAILED=1
 fi
 echo ""
@@ -125,7 +125,7 @@ else
   echo "  Actual:   $ACTUAL_TARGET"
   echo ""
   echo "SOLUTION: Redeploy Core Stack with correct RPS account ID"
-  echo "  cdk deploy ${CDK_DEPLOYMENT_PREFIX}-StackCore --profile ${CORE_PROFILE:-core-account}"
+  echo "  cdk deploy ${STAGE}-StackCore --profile ${CORE_PROFILE:-core-account}"
   FAILED=1
 fi
 echo ""
@@ -147,7 +147,7 @@ READ_STATEMENT=$(echo "$BUCKET_POLICY" | jq -r '.Statement[] | select(.Sid == "A
 if [ -n "$READ_STATEMENT" ]; then
   # Verify it allows GetObject and ListBucket
   ACTIONS=$(echo "$READ_STATEMENT" | jq -r '.Action | if type == "array" then .[] else . end' | sort | tr '\n' ' ')
-  EXPECTED_ROLE="arn:aws:iam::${RPS_ACCOUNT_ID}:role/${CDK_DEPLOYMENT_PREFIX}-processor-lambda-role"
+  EXPECTED_ROLE="arn:aws:iam::${RPS_ACCOUNT_ID}:role/${STAGE}-processor-lambda-role"
   ACTUAL_PRINCIPAL=$(echo "$READ_STATEMENT" | jq -r '.Principal.AWS // empty')
 
   if echo "$ACTIONS" | grep -q "s3:GetObject" && echo "$ACTIONS" | grep -q "s3:ListBucket" && \
@@ -165,7 +165,7 @@ else
   echo "❌ FAIL: Missing 'AllowAccountRpsLambdaRead' statement"
   echo ""
   echo "SOLUTION: Redeploy Core Stack"
-  echo "  cdk deploy ${CDK_DEPLOYMENT_PREFIX}-StackCore --profile ${CORE_PROFILE:-core-account}"
+  echo "  cdk deploy ${STAGE}-StackCore --profile ${CORE_PROFILE:-core-account}"
   FAILED=1
 fi
 echo ""
@@ -181,7 +181,7 @@ WRITE_STATEMENT=$(echo "$BUCKET_POLICY" | jq -r '.Statement[] | select(.Sid == "
 
 if [ -n "$WRITE_STATEMENT" ]; then
   ACTIONS=$(echo "$WRITE_STATEMENT" | jq -r '.Action | if type == "array" then .[] else . end' | sort | tr '\n' ' ')
-  EXPECTED_ROLE="arn:aws:iam::${RPS_ACCOUNT_ID}:role/${CDK_DEPLOYMENT_PREFIX}-processor-lambda-role"
+  EXPECTED_ROLE="arn:aws:iam::${RPS_ACCOUNT_ID}:role/${STAGE}-processor-lambda-role"
   ACTUAL_PRINCIPAL=$(echo "$WRITE_STATEMENT" | jq -r '.Principal.AWS // empty')
 
   if echo "$ACTIONS" | grep -q "s3:PutObject" && [ "$ACTUAL_PRINCIPAL" = "$EXPECTED_ROLE" ]; then
@@ -198,7 +198,7 @@ else
   echo "❌ FAIL: Missing 'AllowAccountRpsLambdaWrite' statement"
   echo ""
   echo "SOLUTION: Redeploy Core Stack"
-  echo "  cdk deploy ${CDK_DEPLOYMENT_PREFIX}-StackCore --profile ${CORE_PROFILE:-core-account}"
+  echo "  cdk deploy ${STAGE}-StackCore --profile ${CORE_PROFILE:-core-account}"
   FAILED=1
 fi
 echo ""
@@ -229,7 +229,7 @@ if [ "$KEY_ID" != "None" ] && [ -n "$KEY_ID" ]; then
   if [ -n "$KMS_STATEMENT" ]; then
     PRINCIPAL=$(echo "$KMS_STATEMENT" | jq -r '.Principal.AWS // empty')
     CONDITION=$(echo "$KMS_STATEMENT" | jq -r '.Condition.StringEquals["kms:ViaService"] // empty')
-    EXPECTED_PRINCIPAL="arn:aws:iam::${RPS_ACCOUNT_ID}:role/${CDK_DEPLOYMENT_PREFIX}-processor-lambda-role"
+    EXPECTED_PRINCIPAL="arn:aws:iam::${RPS_ACCOUNT_ID}:role/${STAGE}-processor-lambda-role"
 
     if [ "$PRINCIPAL" = "$EXPECTED_PRINCIPAL" ] && [ "$CONDITION" = "s3.${REGION}.amazonaws.com" ]; then
       echo "✅ PASS: RPS Lambda role can decrypt via S3 service"
@@ -245,7 +245,7 @@ if [ "$KEY_ID" != "None" ] && [ -n "$KEY_ID" ]; then
     echo "❌ FAIL: Missing 'AllowAccountRpsLambdaDecrypt' statement"
     echo ""
     echo "SOLUTION: Redeploy Core Stack"
-    echo "  cdk deploy ${CDK_DEPLOYMENT_PREFIX}-StackCore --profile ${CORE_PROFILE:-core-account}"
+    echo "  cdk deploy ${STAGE}-StackCore --profile ${CORE_PROFILE:-core-account}"
     FAILED=1
   fi
 else
@@ -259,7 +259,7 @@ echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo "CHECK 8: Cross-Account EventBridge IAM Role"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-ROLE_NAME="${CDK_DEPLOYMENT_PREFIX}-cross-account-eventbridge-role"
+ROLE_NAME="${STAGE}-cross-account-eventbridge-role"
 echo "Role: $ROLE_NAME"
 echo ""
 
@@ -323,7 +323,7 @@ else
   echo "❌ FAIL: IAM role does not exist"
   echo ""
   echo "SOLUTION: Redeploy Core Stack"
-  echo "  cdk deploy ${CDK_DEPLOYMENT_PREFIX}-StackCore --profile ${CORE_PROFILE:-core-account}"
+  echo "  cdk deploy ${STAGE}-StackCore --profile ${CORE_PROFILE:-core-account}"
   FAILED=1
 fi
 echo ""

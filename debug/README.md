@@ -34,7 +34,7 @@ Set your environment and source the configuration:
 
 ```bash
 # Required configuration
-export CDK_DEPLOYMENT_CDK_DEPLOYMENT_PREFIX=dev
+export CDK_DEPLOYMENT_STAGE=dev
 export REGION=eu-west-1
 export CORE_ACCOUNT_ID=111111111111
 export RPS_ACCOUNT_ID=222222222222
@@ -66,7 +66,7 @@ source debug/00-config.sh
 
 ```bash
 # Set your configuration
-export CDK_DEPLOYMENT_CDK_DEPLOYMENT_PREFIX=dev
+export CDK_DEPLOYMENT_STAGE=dev
 export CORE_ACCOUNT_ID=111111111111
 export RPS_ACCOUNT_ID=222222222222
 export REGION=eu-west-1

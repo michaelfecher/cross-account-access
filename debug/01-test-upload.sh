@@ -15,9 +15,18 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/00-config.sh"
 
 # Use provided filename or generate one
+# Path structure depends on CDK_DEPLOYMENT_PREFIX:
+# - With CDK_DEPLOYMENT_PREFIX: input/{developer}/file.txt → output/{developer}/file.txt
+# - Without CDK_DEPLOYMENT_PREFIX: input/file.txt → output/file.txt
 FILENAME="${1:-test-$(date +%s).txt}"
-INPUT_KEY="${INPUT_PREFIX}${FILENAME}"
-OUTPUT_KEY="${OUTPUT_PREFIX}${FILENAME}"
+
+if [ -n "$CDK_DEPLOYMENT_PREFIX" ]; then
+  INPUT_KEY="${INPUT_PREFIX}${CDK_DEPLOYMENT_PREFIX}/${FILENAME}"
+  OUTPUT_KEY="${OUTPUT_PREFIX}${CDK_DEPLOYMENT_PREFIX}/${FILENAME}"
+else
+  INPUT_KEY="${INPUT_PREFIX}${FILENAME}"
+  OUTPUT_KEY="${OUTPUT_PREFIX}${FILENAME}"
+fi
 
 echo "=========================================="
 echo "Test Upload and Flow Monitoring"
@@ -68,8 +77,65 @@ if aws_core s3 ls "s3://$BUCKET_NAME/$OUTPUT_KEY" >/dev/null 2>&1; then
 else
   echo "✗ Output file NOT FOUND"
   echo ""
+
+  # Check Lambda logs for errors
   echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-  echo "Troubleshooting Steps (in order):"
+  echo "Checking Lambda logs for errors..."
+  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  LAMBDA_LOGS=$(aws_rps logs tail "/aws/lambda/$LAMBDA_NAME" \
+    --since 2m \
+    --region "$REGION" 2>/dev/null || echo "")
+
+  # Check for S3 AccessDenied errors
+  if echo "$LAMBDA_LOGS" | grep -qi "Access.*Denied\|Forbidden"; then
+    echo "⚠️  DETECTED: S3 Access Denied Error"
+    echo ""
+    echo "Checking Core stack bucket policy..."
+    echo ""
+
+    BUCKET_POLICY=$(aws_core s3api get-bucket-policy \
+      --bucket "$BUCKET_NAME" \
+      --query 'Policy' \
+      --output text 2>/dev/null)
+
+    # Check read policy principal
+    READ_PRINCIPAL=$(echo "$BUCKET_POLICY" | jq -r '.Statement[] | select(.Sid == "AllowAccountRpsLambdaRead") | .Principal.AWS // empty')
+
+    if [ -z "$READ_PRINCIPAL" ]; then
+      echo "❌ PROBLEM: Bucket policy missing AllowAccountRpsLambdaRead statement"
+      echo ""
+      echo "SOLUTION: Redeploy Core stack"
+      echo "  cdk deploy ${STAGE}-StackCore --profile ${CORE_PROFILE:-core-account}"
+    elif echo "$READ_PRINCIPAL" | grep -q ":role/"; then
+      echo "❌ PROBLEM: Bucket policy grants access to specific role only"
+      echo "  Current: $READ_PRINCIPAL"
+      echo "  Expected (for dev): arn:aws:iam::${RPS_ACCOUNT_ID}:root"
+      echo ""
+      echo "SOLUTION: Redeploy Core stack to use AccountPrincipal"
+      echo "  cdk deploy ${STAGE}-StackCore --profile ${CORE_PROFILE:-core-account}"
+    elif echo "$READ_PRINCIPAL" | grep -q ":root"; then
+      echo "✓ Bucket policy looks correct (AccountPrincipal)"
+      echo "  Principal: $READ_PRINCIPAL"
+      echo ""
+      echo "Check Lambda role permissions in RPS stack..."
+    else
+      echo "⚠️  Unexpected principal format: $READ_PRINCIPAL"
+    fi
+    echo ""
+  fi
+
+  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  echo "Full Lambda logs (last 2 minutes):"
+  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  if [ -n "$LAMBDA_LOGS" ]; then
+    echo "$LAMBDA_LOGS"
+  else
+    echo "No recent Lambda logs found"
+  fi
+  echo ""
+
+  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  echo "Additional Troubleshooting Steps:"
   echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
   echo ""
   echo "1. Check SQS queue for stuck messages"

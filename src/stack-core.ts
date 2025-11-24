@@ -11,7 +11,7 @@ export interface StackCoreProps extends cdk.StackProps {
   readonly prefix: string;
   readonly accountRpsId: string;
   readonly region: string;
-  readonly inputPrefix?: string;  // S3 prefix for input files (default: 'input/')
+  readonly inputPrefix?: string; // S3 prefix for input files (default: 'input/')
 }
 
 export class StackCore extends cdk.Stack {
@@ -23,8 +23,14 @@ export class StackCore extends cdk.Stack {
 
     const { prefix, accountRpsId, region, inputPrefix = 'input/' } = props;
 
-    // RPS Lambda role ARN - used in bucket and KMS policies
-    const lambdaRoleArn = `arn:aws:iam::${accountRpsId}:role/${prefix}-processor-lambda-role`;
+    // Security: Different principal strategies based on environment
+    // - Dev: AccountPrincipal (allows all deployment roles: dev-*, dev-john-*, dev-alice-*)
+    // - Preprod/Prod: Specific role ARN only (no deployment prefixes allowed)
+    const isDev = prefix.toLowerCase().includes('dev');
+
+    const rpsPrincipal = isDev
+      ? new iam.AccountPrincipal(accountRpsId) // Dev: Allow entire RPS account
+      : new iam.ArnPrincipal(`arn:aws:iam::${accountRpsId}:role/${prefix}-processor-lambda-role`); // Prod: Specific role only
 
     // Create KMS key for S3 bucket encryption with predictable alias
     const bucketKey = new kms.Key(this, 'BucketKey', {
@@ -34,14 +40,13 @@ export class StackCore extends cdk.Stack {
       removalPolicy: cdk.RemovalPolicy.DESTROY, // For dev purposes
     });
 
-    // Grant RPS Account Lambda role access to the KMS key for read and write
-    // Least-privilege: restricted to specific Lambda role + S3 service only
-
+    // Grant RPS Account Lambda roles access to the KMS key for read and write
+    // Uses account principal with S3 service condition for security
     bucketKey.addToResourcePolicy(
       new iam.PolicyStatement({
         sid: 'AllowAccountRpsLambdaDecrypt',
         effect: iam.Effect.ALLOW,
-        principals: [new iam.ArnPrincipal(lambdaRoleArn)],
+        principals: [rpsPrincipal],
         actions: [
           'kms:Decrypt',
           'kms:DescribeKey',
@@ -138,11 +143,12 @@ export class StackCore extends cdk.Stack {
 
     // Grant RPS Account Lambda role access to the bucket
     // Read access to input/* and write access to output/*
+    // Uses account principal to support all deployment Lambda roles
     this.bucket.addToResourcePolicy(
       new iam.PolicyStatement({
         sid: 'AllowAccountRpsLambdaRead',
         effect: iam.Effect.ALLOW,
-        principals: [new iam.ArnPrincipal(lambdaRoleArn)],
+        principals: [rpsPrincipal],
         actions: ['s3:GetObject', 's3:ListBucket'],
         resources: [
           this.bucket.bucketArn,
@@ -155,7 +161,7 @@ export class StackCore extends cdk.Stack {
       new iam.PolicyStatement({
         sid: 'AllowAccountRpsLambdaWrite',
         effect: iam.Effect.ALLOW,
-        principals: [new iam.ArnPrincipal(lambdaRoleArn)],
+        principals: [rpsPrincipal],
         actions: ['s3:PutObject', 's3:PutObjectAcl'],
         resources: [`${this.bucket.bucketArn}/output/*`],
       }),

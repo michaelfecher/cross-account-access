@@ -7,7 +7,9 @@ import * as kms from 'aws-cdk-lib/aws-kms';
 import * as lambda from 'aws-cdk-lib/aws-lambda';
 import * as lambdaEventSources from 'aws-cdk-lib/aws-lambda-event-sources';
 import * as nodejs from 'aws-cdk-lib/aws-lambda-nodejs';
+import * as logs from 'aws-cdk-lib/aws-logs';
 import * as sqs from 'aws-cdk-lib/aws-sqs';
+import * as cr from 'aws-cdk-lib/custom-resources';
 import { NagSuppressions } from 'cdk-nag';
 import { Construct } from 'constructs';
 
@@ -16,8 +18,10 @@ export interface StackRpsProps extends cdk.StackProps {
   readonly accountCoreId: string;
   readonly stackCoreBucketName: string;
   readonly region: string;
-  readonly inputPrefix?: string;   // S3 prefix for input files (default: 'input/')
-  readonly outputPrefix?: string;  // S3 prefix for output files (default: 'output/')
+  readonly inputPrefix?: string; // S3 prefix for input files (default: 'input/')
+  readonly outputPrefix?: string; // S3 prefix for output files (default: 'output/')
+  readonly deploymentPrefix?: string; // Optional deployment-specific subdirectory (e.g., 'john' → 'input/john/')
+  readonly existingEventBusName?: string; // If provided, use shared event bus (for multi-deployment dev environments)
 }
 
 export class StackRps extends cdk.Stack {
@@ -35,6 +39,8 @@ export class StackRps extends cdk.Stack {
       region,
       inputPrefix = 'input/',
       outputPrefix = 'output/',
+      deploymentPrefix,
+      existingEventBusName,
     } = props;
 
     // Create KMS key for SQS encryption
@@ -58,9 +64,14 @@ export class StackRps extends cdk.Stack {
       }),
     );
 
+    // Resource naming: include deployment prefix for isolation
+    // - Without deployment prefix: dev-processor-queue
+    // - With deployment prefix: dev-john-processor-queue
+    const resourcePrefix = deploymentPrefix ? `${prefix}-${deploymentPrefix}` : prefix;
+
     // Create Dead Letter Queue
     const dlq = new sqs.Queue(this, 'ProcessorDLQ', {
-      queueName: `${prefix}-processor-dlq`,
+      queueName: `${resourcePrefix}-processor-dlq`,
       encryption: sqs.QueueEncryption.KMS,
       encryptionMasterKey: queueKey,
       enforceSSL: true,
@@ -69,7 +80,7 @@ export class StackRps extends cdk.Stack {
 
     // Create main processing queue
     this.processorQueue = new sqs.Queue(this, 'ProcessorQueue', {
-      queueName: `${prefix}-processor-queue`,
+      queueName: `${resourcePrefix}-processor-queue`,
       encryption: sqs.QueueEncryption.KMS,
       encryptionMasterKey: queueKey,
       enforceSSL: true,
@@ -83,9 +94,9 @@ export class StackRps extends cdk.Stack {
 
     // Create IAM role for Lambda with specific name for cross-account access
     const lambdaRole = new iam.Role(this, 'ProcessorLambdaRole', {
-      roleName: `${prefix}-processor-lambda-role`,
+      roleName: `${resourcePrefix}-processor-lambda-role`,
       assumedBy: new iam.ServicePrincipal('lambda.amazonaws.com'),
-      description: `Lambda role for ${prefix} S3 processor`,
+      description: `Lambda role for ${resourcePrefix} S3 processor`,
     });
 
     // CloudWatch Logs permissions (replaces AWSLambdaBasicExecutionRole)
@@ -100,13 +111,13 @@ export class StackRps extends cdk.Stack {
           'logs:PutLogEvents',
         ],
         resources: [
-          `arn:aws:logs:${region}:${this.account}:log-group:/aws/lambda/${prefix}-s3-processor`,
-          `arn:aws:logs:${region}:${this.account}:log-group:/aws/lambda/${prefix}-s3-processor:*`,
+          `arn:aws:logs:${region}:${this.account}:log-group:/aws/lambda/${resourcePrefix}-s3-processor`,
+          `arn:aws:logs:${region}:${this.account}:log-group:/aws/lambda/${resourcePrefix}-s3-processor:*`,
         ],
       }),
     );
 
-    // Grant Lambda access to read from input/ and write to output/ in Core Stack bucket
+    // Grant Lambda access to read from input prefix and write to output prefix in Core Stack bucket
     lambdaRole.addToPolicy(
       new iam.PolicyStatement({
         sid: 'ReadFromStackCoreBucket',
@@ -114,7 +125,7 @@ export class StackRps extends cdk.Stack {
         actions: ['s3:GetObject', 's3:ListBucket'],
         resources: [
           `arn:aws:s3:::${stackCoreBucketName}`,
-          `arn:aws:s3:::${stackCoreBucketName}/input/*`,
+          `arn:aws:s3:::${stackCoreBucketName}/${inputPrefix}*`,
         ],
       }),
     );
@@ -124,7 +135,7 @@ export class StackRps extends cdk.Stack {
         sid: 'WriteToStackCoreBucket',
         effect: iam.Effect.ALLOW,
         actions: ['s3:PutObject', 's3:PutObjectAcl'],
-        resources: [`arn:aws:s3:::${stackCoreBucketName}/output/*`],
+        resources: [`arn:aws:s3:::${stackCoreBucketName}/${outputPrefix}*`],
       }),
     );
 
@@ -148,8 +159,8 @@ export class StackRps extends cdk.Stack {
           },
           StringLike: {
             'kms:EncryptionContext:aws:s3:arn': [
-              `arn:aws:s3:::${stackCoreBucketName}/input/*`,
-              `arn:aws:s3:::${stackCoreBucketName}/output/*`,
+              `arn:aws:s3:::${stackCoreBucketName}/${inputPrefix}*`,
+              `arn:aws:s3:::${stackCoreBucketName}/${outputPrefix}*`,
             ],
           },
         },
@@ -176,7 +187,7 @@ export class StackRps extends cdk.Stack {
 
     // Create Lambda function
     this.processorLambda = new nodejs.NodejsFunction(this, 'ProcessorLambda', {
-      functionName: `${prefix}-s3-processor`,
+      functionName: `${resourcePrefix}-s3-processor`,
       runtime: lambda.Runtime.NODEJS_22_X,
       handler: 'handler',
       entry: path.join(__dirname, '../lambda/processor.ts'),
@@ -188,7 +199,8 @@ export class StackRps extends cdk.Stack {
         PREFIX: prefix,
         INPUT_PREFIX: inputPrefix,
         OUTPUT_PREFIX: outputPrefix,
-        POWERTOOLS_SERVICE_NAME: `${prefix}-processor`,
+        ...(deploymentPrefix && { CDK_DEPLOYMENT_PREFIX: deploymentPrefix }),
+        POWERTOOLS_SERVICE_NAME: `${resourcePrefix}-processor`,
         LOG_LEVEL: 'INFO',
       },
       bundling: {
@@ -207,20 +219,138 @@ export class StackRps extends cdk.Stack {
       }),
     );
 
-    // Create custom event bus (bypasses SCP restrictions on default bus)
-    this.eventBus = new events.EventBus(this, 'CrossAccountEventBus', {
-      eventBusName: `${prefix}-cross-account-bus`,
+    // ========================================
+    // Custom Event Bus Setup (Multi-Deployment Support)
+    // ========================================
+    // Use Custom Resource for idempotent event bus creation to support shared bus in dev environments.
+    // This allows multiple deployments (dev-alice, dev-bob) to deploy separate stacks to the same RPS
+    // Dev account while sharing a single custom event bus. Without this Custom Resource approach:
+    // - First deployment to deploy would succeed (creates bus)
+    // - Second deployment would fail (bus already exists - ResourceAlreadyExistsException)
+    // - Manual setup steps would be required (creates deployment friction)
+    //
+    // With Custom Resource + ignoreErrorCodesMatching:
+    // - First deployment creates the bus (onCreate succeeds)
+    // - Subsequent deployments reuse existing bus (ResourceAlreadyExistsException ignored)
+    // - No race conditions or manual prerequisites
+    // - Shared resource survives individual stack deletions (intentionally no onDelete)
+    const eventBusName = existingEventBusName || `${prefix}-cross-account-bus`;
+
+    const ensureEventBus = new cr.AwsCustomResource(this, 'EnsureEventBus', {
+      onCreate: {
+        service: 'EventBridge',
+        action: 'createEventBus',
+        parameters: { Name: eventBusName },
+        physicalResourceId: cr.PhysicalResourceId.of(eventBusName),
+        ignoreErrorCodesMatching: 'ResourceAlreadyExistsException', // Idempotent!
+      },
+      onUpdate: {
+        service: 'EventBridge',
+        action: 'createEventBus',
+        parameters: { Name: eventBusName },
+        physicalResourceId: cr.PhysicalResourceId.of(eventBusName),
+        ignoreErrorCodesMatching: 'ResourceAlreadyExistsException',
+      },
+      // onDelete intentionally empty - preserve shared resource for other deployments
+      policy: cr.AwsCustomResourcePolicy.fromSdkCalls({
+        resources: [`arn:aws:events:${region}:${this.account}:event-bus/${eventBusName}`],
+      }),
+      logRetention: logs.RetentionDays.ONE_WEEK,
     });
 
+    // Reference the event bus (either newly created or existing shared bus)
+    // Using IEventBus (imported) rather than EventBus because:
+    // - The bus might have been created by another stack (shared dev environment)
+    // - We can't use addToResourcePolicy() on imported resources (IEventBus limitation)
+    // - That's why we use Custom Resource below for permission granting
+    this.eventBus = events.EventBus.fromEventBusName(
+      this,
+      'CrossAccountEventBus',
+      eventBusName,
+    ) as events.EventBus;
+
+    // Grant Core Account permission to put events on custom event bus using Custom Resource
+    // Why Custom Resource instead of this.eventBus.addToResourcePolicy()?
+    // - If using shared bus (existingEventBusName provided), this.eventBus is IEventBus (imported)
+    // - IEventBus doesn't have addToResourcePolicy() method (only concrete EventBus class does)
+    // - Custom Resource works regardless of whether bus is newly created or imported
+    // - Allows consistent permission management across all deployment scenarios
+    //
+    // StatementId includes deployment prefix to avoid conflicts when sharing bus:
+    // - Regular dev: "AllowCoreAccount-dev"
+    // - John's stack: "AllowCoreAccount-dev-john"
+    const permissionStatementId = deploymentPrefix
+      ? `AllowCoreAccount-${prefix}-${deploymentPrefix}`
+      : `AllowCoreAccount-${prefix}`;
+
+    const grantCoreAccountPermission = new cr.AwsCustomResource(this, 'GrantCoreAccountPermission', {
+      onCreate: {
+        service: 'EventBridge',
+        action: 'putPermission',
+        parameters: {
+          EventBusName: eventBusName,
+          StatementId: permissionStatementId,
+          Action: 'events:PutEvents',
+          Principal: accountCoreId,
+        },
+        physicalResourceId: cr.PhysicalResourceId.of(`${eventBusName}-permission-${permissionStatementId}`),
+        ignoreErrorCodesMatching: 'ResourceAlreadyExistsException',
+      },
+      onUpdate: {
+        service: 'EventBridge',
+        action: 'putPermission',
+        parameters: {
+          EventBusName: eventBusName,
+          StatementId: permissionStatementId,
+          Action: 'events:PutEvents',
+          Principal: accountCoreId,
+        },
+        physicalResourceId: cr.PhysicalResourceId.of(`${eventBusName}-permission-${permissionStatementId}`),
+        ignoreErrorCodesMatching: 'ResourceAlreadyExistsException',
+      },
+      onDelete: {
+        service: 'EventBridge',
+        action: 'removePermission',
+        parameters: {
+          EventBusName: eventBusName,
+          StatementId: permissionStatementId,
+        },
+        ignoreErrorCodesMatching: 'ResourceNotFoundException',
+      },
+      policy: cr.AwsCustomResourcePolicy.fromSdkCalls({
+        resources: [`arn:aws:events:${region}:${this.account}:event-bus/${eventBusName}`],
+      }),
+      logRetention: logs.RetentionDays.ONE_WEEK,
+    });
+
+    // Ensure permission is granted after bus exists
+    grantCoreAccountPermission.node.addDependency(ensureEventBus);
+
     // Create EventBridge rule to receive events from Core Account
+    // Multi-deployment isolation via optional deployment prefix:
+    // - With deploymentPrefix='john': filters by "input/john/" → processes only john's files
+    // - Without deploymentPrefix: filters by "input/" → processes all input/ events
+    //   (Lambda will skip subdirectories to avoid processing other deployments' files)
+    const objectKeyPrefix = deploymentPrefix ? `${inputPrefix}${deploymentPrefix}/` : inputPrefix;
+
     const s3EventRule = new events.Rule(this, 'S3EventFromCoreAccount', {
-      ruleName: `${prefix}-receive-s3-events`,
-      description: `Receives S3 events from Core Account for ${prefix}`,
+      ruleName: `${resourcePrefix}-receive-s3-events`,
+      description: deploymentPrefix
+        ? `Receives S3 events from Core Account for ${resourcePrefix} (filters by ${objectKeyPrefix})`
+        : `Receives S3 events from Core Account for ${resourcePrefix} (processes ${inputPrefix} root files only)`,
       eventBus: this.eventBus,
       eventPattern: {
         account: [accountCoreId],
         source: ['aws.s3'],
         detailType: ['Object Created'],
+        detail: {
+          bucket: {
+            name: [stackCoreBucketName],
+          },
+          object: {
+            key: [{ prefix: objectKeyPrefix }],
+          },
+        },
       },
     });
 
@@ -240,17 +370,6 @@ export class StackRps extends cdk.Stack {
             'aws:SourceArn': s3EventRule.ruleArn,
           },
         },
-      }),
-    );
-
-    // Grant Core Account EventBridge permission to put events on custom event bus
-    this.eventBus.addToResourcePolicy(
-      new iam.PolicyStatement({
-        sid: `AllowCoreAccount-${prefix}`,
-        effect: iam.Effect.ALLOW,
-        principals: [new iam.AccountPrincipal(accountCoreId)],
-        actions: ['events:PutEvents'],
-        resources: [this.eventBus.eventBusArn],
       }),
     );
 
@@ -281,18 +400,46 @@ export class StackRps extends cdk.Stack {
       },
     ]);
 
-    // Suppress EVB1 for event bus policy - restricted to specific Core account
+    // Suppress CDK NAG warnings for Custom Resource Lambda providers
+    // These Lambdas are created by AWS CDK for Custom Resources and use AWS managed policies
     NagSuppressions.addResourceSuppressions(
-      this.eventBus,
+      ensureEventBus,
       [
         {
-          id: 'AwsSolutions-EVB1',
-          reason:
-            'Event bus policy restricts access to specific Core account only for cross-account event routing',
+          id: 'AwsSolutions-IAM4',
+          reason: 'Custom Resource Lambda provider uses AWS managed policy for CloudWatch Logs (CDK-generated)',
+          appliesTo: ['Policy::arn:<AWS::Partition>:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole'],
         },
       ],
       true,
     );
+
+    NagSuppressions.addResourceSuppressions(
+      grantCoreAccountPermission,
+      [
+        {
+          id: 'AwsSolutions-IAM4',
+          reason: 'Custom Resource Lambda provider uses AWS managed policy for CloudWatch Logs (CDK-generated)',
+          appliesTo: ['Policy::arn:<AWS::Partition>:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole'],
+        },
+      ],
+      true,
+    );
+
+    // Suppress IAM warnings for log retention Custom Resource (CDK-managed)
+    // The LogRetention construct creates a Lambda that manages CloudWatch log retention
+    NagSuppressions.addStackSuppressions(this, [
+      {
+        id: 'AwsSolutions-IAM4',
+        reason: 'Log Retention Lambda uses AWS managed policy (CDK-generated construct)',
+        appliesTo: ['Policy::arn:<AWS::Partition>:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole'],
+      },
+      {
+        id: 'AwsSolutions-IAM5',
+        reason: 'Log Retention Lambda needs wildcard permissions to manage log groups across the stack',
+        appliesTo: ['Resource::*'],
+      },
+    ]);
 
     NagSuppressions.addResourceSuppressions(
       queueKey,
@@ -305,29 +452,29 @@ export class StackRps extends cdk.Stack {
       true,
     );
 
-    // Outputs
+    // Outputs - use resourcePrefix for unique export names
     new cdk.CfnOutput(this, 'QueueUrl', {
       value: this.processorQueue.queueUrl,
       description: 'URL of the processor queue',
-      exportName: `${prefix}-StackRps-QueueUrl`,
+      exportName: `${resourcePrefix}-StackRps-QueueUrl`,
     });
 
     new cdk.CfnOutput(this, 'LambdaArn', {
       value: this.processorLambda.functionArn,
       description: 'ARN of the processor Lambda',
-      exportName: `${prefix}-StackRps-LambdaArn`,
+      exportName: `${resourcePrefix}-StackRps-LambdaArn`,
     });
 
     new cdk.CfnOutput(this, 'EventBusArn', {
       value: this.eventBus.eventBusArn,
       description: 'ARN of the custom event bus for cross-account events',
-      exportName: `${prefix}-StackRps-EventBusArn`,
+      exportName: `${resourcePrefix}-StackRps-EventBusArn`,
     });
 
     new cdk.CfnOutput(this, 'EventBusName', {
       value: this.eventBus.eventBusName,
       description: 'Name of the custom event bus',
-      exportName: `${prefix}-StackRps-EventBusName`,
+      exportName: `${resourcePrefix}-StackRps-EventBusName`,
     });
   }
 }

@@ -39,7 +39,7 @@ else
   echo "❌ FAIL: Event bus does not exist"
   echo ""
   echo "SOLUTION: Redeploy RPS Stack"
-  echo "  cdk deploy ${CDK_DEPLOYMENT_PREFIX}-StackRps --profile ${RPS_PROFILE:-rps-account}"
+  echo "  cdk deploy ${STAGE}-StackRps --profile ${RPS_PROFILE:-rps-account}"
   FAILED=1
 fi
 echo ""
@@ -72,7 +72,7 @@ else
   echo "❌ FAIL: No event bus policy found"
   echo ""
   echo "SOLUTION: Redeploy RPS Stack"
-  echo "  cdk deploy ${CDK_DEPLOYMENT_PREFIX}-StackRps --profile ${RPS_PROFILE:-rps-account}"
+  echo "  cdk deploy ${STAGE}-StackRps --profile ${RPS_PROFILE:-rps-account}"
   FAILED=1
 fi
 echo ""
@@ -97,7 +97,7 @@ else
   echo "❌ FAIL: Rule state is '$RULE_STATE' (expected ENABLED)"
   echo ""
   echo "SOLUTION: Redeploy RPS Stack"
-  echo "  cdk deploy ${CDK_DEPLOYMENT_PREFIX}-StackRps --profile ${RPS_PROFILE:-rps-account}"
+  echo "  cdk deploy ${STAGE}-StackRps --profile ${RPS_PROFILE:-rps-account}"
   FAILED=1
 fi
 echo ""
@@ -117,18 +117,38 @@ EVENT_PATTERN=$(aws_rps events describe-rule \
 ACCOUNT=$(echo "$EVENT_PATTERN" | jq -r '.account[0] // empty')
 SOURCE=$(echo "$EVENT_PATTERN" | jq -r '.source[0] // empty')
 DETAIL_TYPE=$(echo "$EVENT_PATTERN" | jq -r '."detail-type"[0] // empty')
+BUCKET_CHECK=$(echo "$EVENT_PATTERN" | jq -r '.detail.bucket.name[0] // empty')
+PREFIX_CHECK=$(echo "$EVENT_PATTERN" | jq -r '.detail.object.key[0].prefix // empty')
+
+# Expected prefix depends on CDK_DEPLOYMENT_PREFIX:
+# - With CDK_DEPLOYMENT_PREFIX: input/{developer}/ (e.g., "input/john/")
+# - Without CDK_DEPLOYMENT_PREFIX: input/ (processes all, Lambda filters subdirectories)
+if [ -n "$CDK_DEPLOYMENT_PREFIX" ]; then
+  EXPECTED_PREFIX="${INPUT_PREFIX}${CDK_DEPLOYMENT_PREFIX}/"
+else
+  EXPECTED_PREFIX="${INPUT_PREFIX}"
+fi
 
 if [ "$ACCOUNT" = "$CORE_ACCOUNT_ID" ] && [ "$SOURCE" = "aws.s3" ] && \
-   [ "$DETAIL_TYPE" = "Object Created" ]; then
-  echo "✅ PASS: Event pattern filters Core account S3 Object Created events"
+   [ "$DETAIL_TYPE" = "Object Created" ] && [ "$BUCKET_CHECK" = "$BUCKET_NAME" ] && \
+   [ "$PREFIX_CHECK" = "$EXPECTED_PREFIX" ]; then
+  if [ -n "$CDK_DEPLOYMENT_PREFIX" ]; then
+    echo "✅ PASS: Event pattern filters for developer-specific prefix ${EXPECTED_PREFIX}"
+  else
+    echo "✅ PASS: Event pattern filters for all ${EXPECTED_PREFIX} events (Lambda skips subdirectories)"
+  fi
   echo "  Account: $ACCOUNT"
   echo "  Source: $SOURCE"
   echo "  DetailType: $DETAIL_TYPE"
+  echo "  Bucket: $BUCKET_CHECK"
+  echo "  Prefix: $PREFIX_CHECK"
 else
   echo "❌ FAIL: Event pattern incorrect"
   echo "  Account: $ACCOUNT (expected: $CORE_ACCOUNT_ID)"
   echo "  Source: $SOURCE (expected: aws.s3)"
   echo "  DetailType: $DETAIL_TYPE (expected: Object Created)"
+  echo "  Bucket: $BUCKET_CHECK (expected: $BUCKET_NAME)"
+  echo "  Prefix: $PREFIX_CHECK (expected: $EXPECTED_PREFIX)"
   FAILED=1
 fi
 echo ""
@@ -190,7 +210,7 @@ else
   echo "❌ FAIL: Queue does not exist"
   echo ""
   echo "SOLUTION: Redeploy RPS Stack"
-  echo "  cdk deploy ${CDK_DEPLOYMENT_PREFIX}-StackRps --profile ${RPS_PROFILE:-rps-account}"
+  echo "  cdk deploy ${STAGE}-StackRps --profile ${RPS_PROFILE:-rps-account}"
   FAILED=1
 fi
 echo ""
@@ -221,7 +241,7 @@ if [ -n "$QUEUE_URL" ]; then
       echo "  Condition: aws:SourceAccount = $SOURCE_ACCOUNT"
       echo ""
       echo "SOLUTION: Redeploy RPS Stack to fix the policy"
-      echo "  cdk deploy ${CDK_DEPLOYMENT_PREFIX}-StackRps --profile ${RPS_PROFILE:-rps-account}"
+      echo "  cdk deploy ${STAGE}-StackRps --profile ${RPS_PROFILE:-rps-account}"
       FAILED=1
     else
       # Check for correct condition (aws:SourceArn)
@@ -262,7 +282,7 @@ else
   echo "❌ FAIL: Lambda function does not exist"
   echo ""
   echo "SOLUTION: Redeploy RPS Stack"
-  echo "  cdk deploy ${CDK_DEPLOYMENT_PREFIX}-StackRps --profile ${RPS_PROFILE:-rps-account}"
+  echo "  cdk deploy ${STAGE}-StackRps --profile ${RPS_PROFILE:-rps-account}"
   FAILED=1
 fi
 echo ""
@@ -342,7 +362,7 @@ if [ "$S3_READ_FOUND" = false ]; then
   echo "❌ FAIL: Missing S3 read permissions for Core bucket"
   echo ""
   echo "SOLUTION: Redeploy RPS Stack"
-  echo "  cdk deploy ${CDK_DEPLOYMENT_PREFIX}-StackRps --profile ${RPS_PROFILE:-rps-account}"
+  echo "  cdk deploy ${STAGE}-StackRps --profile ${RPS_PROFILE:-rps-account}"
   FAILED=1
 fi
 echo ""
@@ -383,7 +403,7 @@ if [ "$S3_WRITE_FOUND" = false ]; then
   echo "❌ FAIL: Missing S3 write permissions for Core bucket"
   echo ""
   echo "SOLUTION: Redeploy RPS Stack"
-  echo "  cdk deploy ${CDK_DEPLOYMENT_PREFIX}-StackRps --profile ${RPS_PROFILE:-rps-account}"
+  echo "  cdk deploy ${STAGE}-StackRps --profile ${RPS_PROFILE:-rps-account}"
   FAILED=1
 fi
 echo ""
@@ -432,7 +452,7 @@ echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo "CHECK 13: Dead Letter Queue"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-DLQ_NAME="${CDK_DEPLOYMENT_PREFIX}-processor-dlq"
+DLQ_NAME="${STAGE}-processor-dlq"
 echo "DLQ: $DLQ_NAME"
 echo ""
 

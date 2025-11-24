@@ -7,7 +7,7 @@
 #   bash debug/02-trace-flow.sh
 #
 # Or with custom config:
-#   export CDK_DEPLOYMENT_PREFIX=dev CORE_ACCOUNT_ID=... RPS_ACCOUNT_ID=...
+#   export STAGE=dev CORE_ACCOUNT_ID=... RPS_ACCOUNT_ID=...
 #   bash debug/02-trace-flow.sh
 
 set -e
@@ -249,7 +249,7 @@ if (( $(echo "$STEP2_TRIGGERED > 0" | bc -l) )); then
     echo "This is the MOST COMMON issue - SQS queue policy blocking EventBridge!"
     echo ""
     echo "SOLUTION: Redeploy the RPS stack to apply the correct SQS policy:"
-    echo "  cdk deploy ${CDK_DEPLOYMENT_PREFIX}-StackRps --profile ${RPS_PROFILE:-rps-account}"
+    echo "  cdk deploy ${STAGE}-StackRps --profile ${RPS_PROFILE:-rps-account}"
     echo ""
     echo "The code already has the fix (uses aws:SourceArn), but if you deployed"
     echo "before this fix, the queue still has the old policy."

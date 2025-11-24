@@ -20,7 +20,7 @@
 #
 
 # === Required Configuration ===
-export CDK_DEPLOYMENT_PREFIX="${CDK_DEPLOYMENT_PREFIX:-dev}"
+export STAGE="${STAGE:-dev}"
 export REGION="${REGION:-eu-west-1}"
 export CORE_ACCOUNT_ID="${CORE_ACCOUNT_ID:-111111111111}"
 export RPS_ACCOUNT_ID="${RPS_ACCOUNT_ID:-222222222222}"
@@ -29,13 +29,25 @@ export RPS_ACCOUNT_ID="${RPS_ACCOUNT_ID:-222222222222}"
 export INPUT_PREFIX="${INPUT_PREFIX:-input/}"
 export OUTPUT_PREFIX="${OUTPUT_PREFIX:-output/}"
 
+# === Developer Prefix (optional for multi-developer isolation) ===
+# If set, creates subdirectory under input/output for this developer
+# Example: CDK_DEPLOYMENT_PREFIX=john → processes input/john/ → output/john/
+export CDK_DEPLOYMENT_PREFIX="${CDK_DEPLOYMENT_PREFIX:-}"
+
 # === Derived Resource Names ===
-export BUCKET_NAME="${CDK_DEPLOYMENT_PREFIX}-core-test-bucket-${CORE_ACCOUNT_ID}-${REGION}"
-export QUEUE_NAME="${CDK_DEPLOYMENT_PREFIX}-processor-queue"
-export LAMBDA_NAME="${CDK_DEPLOYMENT_PREFIX}-s3-processor"
-export CORE_EVENTBRIDGE_RULE="${CDK_DEPLOYMENT_PREFIX}-s3-input-events"
-export RPS_EVENTBRIDGE_RULE="${CDK_DEPLOYMENT_PREFIX}-receive-s3-events"
-export CUSTOM_EVENT_BUS="${CDK_DEPLOYMENT_PREFIX}-cross-account-bus"
+# Resource naming includes developer prefix for isolation
+if [ -n "$CDK_DEPLOYMENT_PREFIX" ]; then
+  RESOURCE_PREFIX="${STAGE}-${CDK_DEPLOYMENT_PREFIX}"
+else
+  RESOURCE_PREFIX="${STAGE}"
+fi
+
+export BUCKET_NAME="${STAGE}-core-test-bucket-${CORE_ACCOUNT_ID}-${REGION}"
+export QUEUE_NAME="${RESOURCE_PREFIX}-processor-queue"
+export LAMBDA_NAME="${RESOURCE_PREFIX}-s3-processor"
+export CORE_EVENTBRIDGE_RULE="${STAGE}-s3-input-events"
+export RPS_EVENTBRIDGE_RULE="${RESOURCE_PREFIX}-receive-s3-events"
+export CUSTOM_EVENT_BUS="${STAGE}-cross-account-bus"
 
 # === Profile-based vs Environment-based Authentication ===
 # If CORE_PROFILE is set, use --profile flag, otherwise use environment variables
@@ -73,10 +85,10 @@ aws_rps() {
 
 # === Display Configuration ===
 echo "=== Debug Configuration ==="
-echo "CDK_DEPLOYMENT_PREFIX: $CDK_DEPLOYMENT_PREFIX"
-echo "REGION:                $REGION"
-echo "CORE_ACCOUNT_ID:       $CORE_ACCOUNT_ID"
-echo "RPS_ACCOUNT_ID:        $RPS_ACCOUNT_ID"
+echo "STAGE:             $STAGE"
+echo "REGION:            $REGION"
+echo "CORE_ACCOUNT_ID:   $CORE_ACCOUNT_ID"
+echo "RPS_ACCOUNT_ID:    $RPS_ACCOUNT_ID"
 echo ""
 echo "BUCKET_NAME:       $BUCKET_NAME"
 echo "QUEUE_NAME:        $QUEUE_NAME"

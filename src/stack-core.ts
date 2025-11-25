@@ -23,6 +23,20 @@ export class StackCore extends cdk.Stack {
 
     const { prefix, accountRpsId, region, inputPrefix = 'input/' } = props;
 
+    // Validate required props
+    if (!prefix || prefix.trim().length === 0) {
+      throw new Error('StackCore: prefix is required and cannot be empty');
+    }
+    if (!/^\d{12}$/.test(accountRpsId)) {
+      throw new Error(`StackCore: accountRpsId must be a 12-digit AWS account ID, got: ${accountRpsId}`);
+    }
+    if (!region || region.trim().length === 0) {
+      throw new Error('StackCore: region is required and cannot be empty');
+    }
+    if (!inputPrefix.endsWith('/')) {
+      throw new Error(`StackCore: inputPrefix must end with '/', got: ${inputPrefix}`);
+    }
+
     // Security: Different principal strategies based on environment
     // - Dev: AccountPrincipal (allows all deployment roles: dev-*, dev-john-*, dev-alice-*)
     // - Preprod/Prod: Specific role ARN only (no deployment prefixes allowed)
@@ -32,12 +46,17 @@ export class StackCore extends cdk.Stack {
       ? new iam.AccountPrincipal(accountRpsId) // Dev: Allow entire RPS account
       : new iam.ArnPrincipal(`arn:aws:iam::${accountRpsId}:role/${prefix}-processor-lambda-role`); // Prod: Specific role only
 
+    // Environment-based retention policies
+    // Dev: DESTROY (cost optimization, easy cleanup)
+    // Prod: RETAIN (data protection, compliance)
+    const removalPolicy = isDev ? cdk.RemovalPolicy.DESTROY : cdk.RemovalPolicy.RETAIN;
+
     // Create KMS key for S3 bucket encryption with predictable alias
     const bucketKey = new kms.Key(this, 'BucketKey', {
       alias: `alias/${prefix}-bucket-key`,
       description: `KMS key for ${prefix} S3 bucket encryption`,
       enableKeyRotation: true,
-      removalPolicy: cdk.RemovalPolicy.DESTROY, // For dev purposes
+      removalPolicy,
     });
 
     // Grant RPS Account Lambda roles access to the KMS key for read and write
@@ -68,8 +87,8 @@ export class StackCore extends cdk.Stack {
       blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
       enforceSSL: true,
       versioned: false,
-      removalPolicy: cdk.RemovalPolicy.DESTROY,
-      autoDeleteObjects: true,
+      removalPolicy,
+      autoDeleteObjects: isDev, // Only auto-delete in dev
       objectOwnership: s3.ObjectOwnership.BUCKET_OWNER_PREFERRED,
     });
 
@@ -105,8 +124,8 @@ export class StackCore extends cdk.Stack {
       enforceSSL: true,
       serverAccessLogsBucket: accessLogsBucket,
       serverAccessLogsPrefix: 'access-logs/',
-      removalPolicy: cdk.RemovalPolicy.DESTROY,
-      autoDeleteObjects: true,
+      removalPolicy,
+      autoDeleteObjects: isDev, // Only auto-delete in dev
       eventBridgeEnabled: true, // Enable EventBridge notifications
       lifecycleRules: [
         {

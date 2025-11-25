@@ -43,11 +43,40 @@ export class StackRps extends cdk.Stack {
       existingEventBusName,
     } = props;
 
+    // Validate required props
+    if (!prefix || prefix.trim().length === 0) {
+      throw new Error('StackRps: prefix is required and cannot be empty');
+    }
+    if (!/^\d{12}$/.test(accountCoreId)) {
+      throw new Error(`StackRps: accountCoreId must be a 12-digit AWS account ID, got: ${accountCoreId}`);
+    }
+    if (!stackCoreBucketName || stackCoreBucketName.trim().length === 0) {
+      throw new Error('StackRps: stackCoreBucketName is required and cannot be empty');
+    }
+    if (!region || region.trim().length === 0) {
+      throw new Error('StackRps: region is required and cannot be empty');
+    }
+    if (!inputPrefix.endsWith('/')) {
+      throw new Error(`StackRps: inputPrefix must end with '/', got: ${inputPrefix}`);
+    }
+    if (!outputPrefix.endsWith('/')) {
+      throw new Error(`StackRps: outputPrefix must end with '/', got: ${outputPrefix}`);
+    }
+    if (deploymentPrefix && deploymentPrefix.includes('/')) {
+      throw new Error(`StackRps: deploymentPrefix must not contain '/', got: ${deploymentPrefix}`);
+    }
+
+    // Environment-based retention policies
+    // Dev: DESTROY (cost optimization, easy cleanup)
+    // Prod: RETAIN (data protection, compliance)
+    const isDev = prefix.toLowerCase().includes('dev');
+    const removalPolicy = isDev ? cdk.RemovalPolicy.DESTROY : cdk.RemovalPolicy.RETAIN;
+
     // Create KMS key for SQS encryption
     const queueKey = new kms.Key(this, 'QueueKey', {
       description: `KMS key for ${prefix} SQS queue encryption`,
       enableKeyRotation: true,
-      removalPolicy: cdk.RemovalPolicy.DESTROY,
+      removalPolicy,
     });
 
     // Grant EventBridge permission to use the KMS key for encrypting SQS messages

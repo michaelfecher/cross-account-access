@@ -25,13 +25,9 @@ export REGION="${REGION:-eu-west-1}"
 export CORE_ACCOUNT_ID="${CORE_ACCOUNT_ID:-111111111111}"
 export RPS_ACCOUNT_ID="${RPS_ACCOUNT_ID:-222222222222}"
 
-# === S3 Prefixes (configurable) ===
-export INPUT_PREFIX="${INPUT_PREFIX:-input/}"
-export OUTPUT_PREFIX="${OUTPUT_PREFIX:-output/}"
-
 # === Developer Prefix (optional for multi-developer isolation) ===
-# If set, creates subdirectory under input/output for this developer
-# Example: CDK_DEPLOYMENT_PREFIX=john → processes input/john/ → output/john/
+# If set, creates separate stack resources for this developer
+# Example: CDK_DEPLOYMENT_PREFIX=john → dev-john-processor-queue
 export CDK_DEPLOYMENT_PREFIX="${CDK_DEPLOYMENT_PREFIX:-}"
 
 # === Derived Resource Names ===
@@ -42,7 +38,8 @@ else
   RESOURCE_PREFIX="${STAGE}"
 fi
 
-export BUCKET_NAME="${STAGE}-core-test-bucket-${CORE_ACCOUNT_ID}-${REGION}"
+export INPUT_BUCKET_NAME="${STAGE}-core-input-bucket-${CORE_ACCOUNT_ID}-${REGION}"
+export OUTPUT_BUCKET_NAME="${STAGE}-core-output-bucket-${CORE_ACCOUNT_ID}-${REGION}"
 export QUEUE_NAME="${RESOURCE_PREFIX}-processor-queue"
 export LAMBDA_NAME="${RESOURCE_PREFIX}-s3-processor"
 export CORE_EVENTBRIDGE_RULE="${STAGE}-s3-input-events"
@@ -85,15 +82,16 @@ aws_rps() {
 
 # === Display Configuration ===
 echo "=== Debug Configuration ==="
-echo "STAGE:             $STAGE"
-echo "REGION:            $REGION"
-echo "CORE_ACCOUNT_ID:   $CORE_ACCOUNT_ID"
-echo "RPS_ACCOUNT_ID:    $RPS_ACCOUNT_ID"
+echo "STAGE:              $STAGE"
+echo "REGION:             $REGION"
+echo "CORE_ACCOUNT_ID:    $CORE_ACCOUNT_ID"
+echo "RPS_ACCOUNT_ID:     $RPS_ACCOUNT_ID"
 echo ""
-echo "BUCKET_NAME:       $BUCKET_NAME"
-echo "QUEUE_NAME:        $QUEUE_NAME"
-echo "LAMBDA_NAME:       $LAMBDA_NAME"
-echo "CUSTOM_EVENT_BUS:  $CUSTOM_EVENT_BUS"
+echo "INPUT_BUCKET_NAME:  $INPUT_BUCKET_NAME"
+echo "OUTPUT_BUCKET_NAME: $OUTPUT_BUCKET_NAME"
+echo "QUEUE_NAME:         $QUEUE_NAME"
+echo "LAMBDA_NAME:        $LAMBDA_NAME"
+echo "CUSTOM_EVENT_BUS:   $CUSTOM_EVENT_BUS"
 echo ""
 if [ -n "$CORE_PROFILE" ]; then
   echo "Core Auth:         Profile ($CORE_PROFILE)"

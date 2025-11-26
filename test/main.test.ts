@@ -1,5 +1,5 @@
 import { App } from 'aws-cdk-lib';
-import { Template } from 'aws-cdk-lib/assertions';
+import { Template, Match } from 'aws-cdk-lib/assertions';
 import { StackCore } from '../src/stack-core';
 import { StackRps } from '../src/stack-rps';
 
@@ -110,7 +110,7 @@ describe('Core Stack', () => {
     }).toThrow('region is required');
   });
 
-  test('Uses AccountPrincipal for dev environments', () => {
+  test('Creates S3AccessRole with correct trust policy for dev environments', () => {
     const app = new App();
     const stack = new StackCore(app, 'TestStackCore', {
       prefix: 'dev',
@@ -121,16 +121,43 @@ describe('Core Stack', () => {
 
     const template = Template.fromStack(stack);
 
-    // Bucket policy should use account principal for dev
-    template.hasResourceProperties('AWS::S3::BucketPolicy', {
-      PolicyDocument: {
-        Statement: [{}, {}, {
-          Sid: 'AllowAccountRpsLambdaRead',
-          Principal: {
-            AWS: '222222222222',
+    // Should create S3AccessRole with AccountPrincipal + StringLike condition for dev
+    // Note: Wildcards not supported in ARN directly in trust policies, so we use Condition
+    // This restricts to only roles matching the pattern (e.g., dev-*-processor-lambda-role)
+    template.hasResourceProperties('AWS::IAM::Role', {
+      RoleName: 'dev-s3-access-role',
+      AssumeRolePolicyDocument: {
+        Statement: [
+          {
+            Effect: 'Allow',
+            Principal: {
+              AWS: 'arn:aws:iam::222222222222:root', // AccountPrincipal format
+            },
+            Action: 'sts:AssumeRole',
+            Condition: {
+              StringLike: {
+                'aws:PrincipalArn': [
+                  'arn:aws:iam::222222222222:role/dev-processor-lambda-role',
+                  'arn:aws:iam::222222222222:role/dev-*-processor-lambda-role',
+                ],
+              },
+            },
           },
-        }],
+        ],
       },
+    });
+
+    // S3AccessRole should have S3 read permissions
+    template.hasResourceProperties('AWS::IAM::Policy', {
+      PolicyDocument: {
+        Statement: Match.arrayWith([
+          Match.objectLike({
+            Action: Match.arrayWith(['s3:GetObject*', 's3:GetBucket*', 's3:List*']),
+            Effect: 'Allow',
+          }),
+        ]),
+      },
+      Roles: [{ Ref: Match.stringLikeRegexp('S3AccessRole') }],
     });
   });
 });
@@ -141,7 +168,8 @@ describe('RPS Stack', () => {
     const stack = new StackRps(app, 'TestStackRps', {
       prefix: 'test',
       accountCoreId: '111111111111',
-      stackCoreBucketName: 'test-bucket',
+      stackCoreInputBucketName: 'test-input-bucket',
+      stackCoreOutputBucketName: 'test-output-bucket',
       region: 'eu-central-1',
       env: { account: '222222222222', region: 'eu-central-1' },
     });
@@ -174,7 +202,8 @@ describe('RPS Stack', () => {
     const stack = new StackRps(app, 'TestStackRps', {
       prefix: 'prod',
       accountCoreId: '111111111111',
-      stackCoreBucketName: 'prod-bucket',
+      stackCoreInputBucketName: 'prod-input-bucket',
+      stackCoreOutputBucketName: 'prod-output-bucket',
       region: 'eu-central-1',
       env: { account: '222222222222', region: 'eu-central-1' },
     });
@@ -193,7 +222,8 @@ describe('RPS Stack', () => {
     const stack = new StackRps(app, 'TestStackRps', {
       prefix: 'dev',
       accountCoreId: '111111111111',
-      stackCoreBucketName: 'dev-bucket',
+      stackCoreInputBucketName: 'dev-input-bucket',
+      stackCoreOutputBucketName: 'dev-output-bucket',
       region: 'eu-central-1',
       env: { account: '222222222222', region: 'eu-central-1' },
     });
@@ -215,7 +245,8 @@ describe('RPS Stack', () => {
       new StackRps(app, 'TestInvalidPrefix', {
         prefix: '',
         accountCoreId: '111111111111',
-        stackCoreBucketName: 'test-bucket',
+        stackCoreInputBucketName: 'test-input-bucket',
+        stackCoreOutputBucketName: 'test-output-bucket',
         region: 'eu-central-1',
         env: { account: '222222222222', region: 'eu-central-1' },
       });
@@ -226,7 +257,8 @@ describe('RPS Stack', () => {
       new StackRps(app, 'TestInvalidAccount', {
         prefix: 'test',
         accountCoreId: 'invalid',
-        stackCoreBucketName: 'test-bucket',
+        stackCoreInputBucketName: 'test-input-bucket',
+        stackCoreOutputBucketName: 'test-output-bucket',
         region: 'eu-central-1',
         env: { account: '222222222222', region: 'eu-central-1' },
       });
@@ -237,7 +269,8 @@ describe('RPS Stack', () => {
       new StackRps(app, 'TestInvalidDeployment', {
         prefix: 'test',
         accountCoreId: '111111111111',
-        stackCoreBucketName: 'test-bucket',
+        stackCoreInputBucketName: 'test-input-bucket',
+        stackCoreOutputBucketName: 'test-output-bucket',
         region: 'eu-central-1',
         deploymentPrefix: 'invalid/path',
         env: { account: '222222222222', region: 'eu-central-1' },
@@ -250,7 +283,8 @@ describe('RPS Stack', () => {
     const stack = new StackRps(app, 'TestStackRps', {
       prefix: 'dev',
       accountCoreId: '111111111111',
-      stackCoreBucketName: 'dev-bucket',
+      stackCoreInputBucketName: 'dev-input-bucket',
+      stackCoreOutputBucketName: 'dev-output-bucket',
       region: 'eu-central-1',
       deploymentPrefix: 'john',
       env: { account: '222222222222', region: 'eu-central-1' },
@@ -273,15 +307,50 @@ describe('RPS Stack', () => {
       },
     });
 
-    // EventBridge rule should filter by deployment prefix path
+    // EventBridge rule should filter by input bucket
     template.hasResourceProperties('AWS::Events::Rule', {
       EventPattern: {
         detail: {
-          object: {
-            key: [{
-              prefix: 'input/john/',
-            }],
+          bucket: {
+            name: ['dev-input-bucket'],
           },
+        },
+      },
+    });
+  });
+
+  test('Lambda role has AssumeRole permission for Core S3AccessRole', () => {
+    const app = new App();
+    const stack = new StackRps(app, 'TestStackRps', {
+      prefix: 'dev',
+      accountCoreId: '111111111111',
+      stackCoreInputBucketName: 'dev-input-bucket',
+      stackCoreOutputBucketName: 'dev-output-bucket',
+      region: 'eu-central-1',
+      env: { account: '222222222222', region: 'eu-central-1' },
+    });
+
+    const template = Template.fromStack(stack);
+
+    // Lambda role should have AssumeRole permission
+    template.hasResourceProperties('AWS::IAM::Policy', {
+      PolicyDocument: {
+        Statement: Match.arrayWith([
+          Match.objectLike({
+            Sid: 'AssumeCoreS3AccessRole',
+            Effect: 'Allow',
+            Action: 'sts:AssumeRole',
+            Resource: 'arn:aws:iam::111111111111:role/dev-s3-access-role',
+          }),
+        ]),
+      },
+    });
+
+    // Lambda should have CORE_S3_ACCESS_ROLE_ARN environment variable
+    template.hasResourceProperties('AWS::Lambda::Function', {
+      Environment: {
+        Variables: {
+          CORE_S3_ACCESS_ROLE_ARN: 'arn:aws:iam::111111111111:role/dev-s3-access-role',
         },
       },
     });

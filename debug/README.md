@@ -78,9 +78,9 @@ bash debug/01-test-upload.sh
 ```
 
 **This script will:**
-1. Upload a test file to `input/`
+1. Upload a test file to input bucket
 2. Wait 10 seconds
-3. Check if output file appears in `output/`
+3. Check if output file appears in output bucket
 4. **If it fails**: Automatically run flow trace to identify the problem
 5. Show you exactly which step is broken
 
@@ -163,9 +163,9 @@ bash debug/04-check-rps.sh
 ### Understanding the Event Flow
 
 ```
-S3 Bucket (Core)
+Input Bucket (Core)
   ↓ EventBridge notification enabled
-Core EventBridge Rule (matches: aws.s3 Object Created, input/*)
+Core EventBridge Rule (matches: aws.s3 Object Created)
   ↓ Target: RPS custom event bus
 RPS Custom Event Bus (policy allows Core account)
   ↓
@@ -175,7 +175,7 @@ SQS Queue (policy allows EventBridge with SourceArn)
   ↓ Event source mapping
 Lambda Function
   ↓ Processes file
-S3 Bucket output/ (Core)
+Output Bucket (Core)
 ```
 
 ### Switching Between Accounts

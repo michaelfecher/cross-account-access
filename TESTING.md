@@ -17,7 +17,8 @@ export PREFIX=dev
 export CORE_ACCOUNT_ID=111111111111
 export RPS_ACCOUNT_ID=222222222222
 export REGION=eu-west-1
-export BUCKET_NAME=${PREFIX}-core-test-bucket-${CORE_ACCOUNT_ID}-${REGION}
+export INPUT_BUCKET_NAME=${PREFIX}-core-input-bucket-${CORE_ACCOUNT_ID}-${REGION}
+export OUTPUT_BUCKET_NAME=${PREFIX}-core-output-bucket-${CORE_ACCOUNT_ID}-${REGION}
 export QUEUE_NAME=${PREFIX}-processor-queue
 export LAMBDA_NAME=${PREFIX}-s3-processor
 ```
@@ -26,19 +27,19 @@ export LAMBDA_NAME=${PREFIX}-s3-processor
 
 ## Step 1: Upload Test File to S3
 
-Upload the sample file to the `input/` prefix in Core Account's S3 bucket:
+Upload the sample file to the Core Account's input S3 bucket:
 
 ```bash
 # Upload test file
 aws s3 cp test-data/sample-input.txt \
-  s3://${BUCKET_NAME}/input/test-$(date +%s).txt \
+  s3://${INPUT_BUCKET_NAME}/test-$(date +%s).txt \
   --profile core-account
 
 # Verify upload
-aws s3 ls s3://${BUCKET_NAME}/input/ --profile core-account
+aws s3 ls s3://${INPUT_BUCKET_NAME}/ --profile core-account
 ```
 
-**Expected:** File appears in S3 bucket's `input/` prefix
+**Expected:** File appears in input S3 bucket
 
 ---
 
@@ -192,30 +193,30 @@ aws logs get-log-events \
 
 ## Step 6: Verify Output File in S3
 
-Check that the Lambda wrote the processed file to the `output/` prefix:
+Check that the Lambda wrote the processed file to the output bucket:
 
 ```bash
 # List output files
-aws s3 ls s3://${BUCKET_NAME}/output/ --profile core-account
+aws s3 ls s3://${OUTPUT_BUCKET_NAME}/ --profile core-account
 
 # Download and view the latest output file
-LATEST_OUTPUT=$(aws s3 ls s3://${BUCKET_NAME}/output/ --profile core-account | tail -1 | awk '{print $4}')
+LATEST_OUTPUT=$(aws s3 ls s3://${OUTPUT_BUCKET_NAME}/ --profile core-account | tail -1 | awk '{print $4}')
 
 echo "Latest output file: ${LATEST_OUTPUT}"
 
 # Download and display content
-aws s3 cp s3://${BUCKET_NAME}/output/${LATEST_OUTPUT} - --profile core-account
+aws s3 cp s3://${OUTPUT_BUCKET_NAME}/${LATEST_OUTPUT} - --profile core-account
 
 # Check file metadata
 aws s3api head-object \
-  --bucket ${BUCKET_NAME} \
-  --key output/${LATEST_OUTPUT} \
+  --bucket ${OUTPUT_BUCKET_NAME} \
+  --key ${LATEST_OUTPUT} \
   --profile core-account \
   --query '{ContentType:ContentType,Metadata:Metadata}'
 ```
 
 **Expected:**
-- File exists in `output/` prefix
+- File exists in output bucket
 - Content includes processing header: "# Processed by dev at [timestamp]"
 - Metadata includes: `sourceKey`, `processedBy`, `processedAt`
 
@@ -226,16 +227,16 @@ aws s3api head-object \
 Compare the original file with the processed output:
 
 ```bash
-# Get the input file name (from output file name)
-INPUT_KEY="input/${LATEST_OUTPUT}"
+# Input and output files have the same key
+INPUT_KEY="${LATEST_OUTPUT}"
 
 echo "Comparing files:"
-echo "Input:  s3://${BUCKET_NAME}/${INPUT_KEY}"
-echo "Output: s3://${BUCKET_NAME}/output/${LATEST_OUTPUT}"
+echo "Input:  s3://${INPUT_BUCKET_NAME}/${INPUT_KEY}"
+echo "Output: s3://${OUTPUT_BUCKET_NAME}/${LATEST_OUTPUT}"
 
 # Download both files
-aws s3 cp s3://${BUCKET_NAME}/${INPUT_KEY} /tmp/input.txt --profile core-account
-aws s3 cp s3://${BUCKET_NAME}/output/${LATEST_OUTPUT} /tmp/output.txt --profile core-account
+aws s3 cp s3://${INPUT_BUCKET_NAME}/${INPUT_KEY} /tmp/input.txt --profile core-account
+aws s3 cp s3://${OUTPUT_BUCKET_NAME}/${LATEST_OUTPUT} /tmp/output.txt --profile core-account
 
 # Show differences
 echo "--- INPUT FILE ---"
@@ -317,16 +318,16 @@ aws events list-targets-by-rule \
   --profile rps-account
 ```
 
-### Check IAM Permissions
+### Check IAM Permissions (AssumeRole Pattern)
 
 ```bash
-# Check Lambda role
+# Check Lambda role (RPS Account)
 aws iam get-role \
   --role-name ${PREFIX}-processor-lambda-role \
   --region ${REGION} \
   --profile rps-account
 
-# List Lambda role policies
+# List Lambda role policies (should have sts:AssumeRole)
 aws iam list-attached-role-policies \
   --role-name ${PREFIX}-processor-lambda-role \
   --region ${REGION} \
@@ -337,12 +338,54 @@ aws iam list-role-policies \
   --region ${REGION} \
   --profile rps-account
 
-# Check S3 bucket policy (Core Account)
+# Get inline policy document to verify AssumeRole permission
+POLICY_NAME=$(aws iam list-role-policies \
+  --role-name ${PREFIX}-processor-lambda-role \
+  --profile rps-account \
+  --query 'PolicyNames[0]' \
+  --output text)
+
+aws iam get-role-policy \
+  --role-name ${PREFIX}-processor-lambda-role \
+  --policy-name ${POLICY_NAME} \
+  --profile rps-account \
+  --query 'PolicyDocument' | jq '.'
+
+# Check S3AccessRole (Core Account)
+aws iam get-role \
+  --role-name ${PREFIX}-s3-access-role \
+  --profile core-account \
+  --query 'Role.{RoleName:RoleName,AssumeRolePolicyDocument:AssumeRolePolicyDocument}' | jq '.'
+
+# List S3AccessRole policies (should have S3 and KMS permissions)
+aws iam list-attached-role-policies \
+  --role-name ${PREFIX}-s3-access-role \
+  --profile core-account
+
+aws iam list-role-policies \
+  --role-name ${PREFIX}-s3-access-role \
+  --profile core-account
+
+# Check input bucket policy (Core Account) - should only deny public access
 aws s3api get-bucket-policy \
-  --bucket ${BUCKET_NAME} \
+  --bucket ${INPUT_BUCKET_NAME} \
   --profile core-account \
   --query 'Policy' \
   --output text | jq '.'
+
+# Check output bucket policy (Core Account) - should only deny public access
+aws s3api get-bucket-policy \
+  --bucket ${OUTPUT_BUCKET_NAME} \
+  --profile core-account \
+  --query 'Policy' \
+  --output text | jq '.'
+```
+
+**Expected:**
+- RPS Lambda role has `sts:AssumeRole` for `arn:aws:iam::${CORE_ACCOUNT_ID}:role/${PREFIX}-s3-access-role`
+- Core S3AccessRole trust policy allows RPS Lambda role (using StringLike condition)
+- S3AccessRole has S3 read (input bucket) and write (output bucket) and KMS decrypt/encrypt permissions
+- Both bucket policies only deny public access (no cross-account allows)
 ```
 
 ---
@@ -367,11 +410,11 @@ aws s3api get-bucket-policy \
 After testing, clean up the test files:
 
 ```bash
-# Remove test files from input/
-aws s3 rm s3://${BUCKET_NAME}/input/ --recursive --profile core-account
+# Remove test files from input bucket
+aws s3 rm s3://${INPUT_BUCKET_NAME}/ --recursive --profile core-account
 
-# Remove test files from output/
-aws s3 rm s3://${BUCKET_NAME}/output/ --recursive --profile core-account
+# Remove test files from output bucket
+aws s3 rm s3://${OUTPUT_BUCKET_NAME}/ --recursive --profile core-account
 
 # Purge SQS queue (if needed)
 aws sqs purge-queue \
@@ -391,7 +434,7 @@ To test at scale, upload multiple files:
 for i in {1..10}; do
   echo "Test file $i - $(date)" > /tmp/test-$i.txt
   aws s3 cp /tmp/test-$i.txt \
-    s3://${BUCKET_NAME}/input/load-test-$i.txt \
+    s3://${INPUT_BUCKET_NAME}/load-test-$i.txt \
     --profile core-account
   echo "Uploaded file $i"
   sleep 1
@@ -402,10 +445,10 @@ sleep 30
 
 # Check results
 echo "Input files:"
-aws s3 ls s3://${BUCKET_NAME}/input/ --profile core-account | wc -l
+aws s3 ls s3://${INPUT_BUCKET_NAME}/ --profile core-account | wc -l
 
 echo "Output files:"
-aws s3 ls s3://${BUCKET_NAME}/output/ --profile core-account | wc -l
+aws s3 ls s3://${OUTPUT_BUCKET_NAME}/ --profile core-account | wc -l
 
 echo "DLQ messages (should be 0):"
 aws sqs get-queue-attributes \

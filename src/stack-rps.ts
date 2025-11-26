@@ -16,11 +16,11 @@ import { Construct } from 'constructs';
 export interface StackRpsProps extends cdk.StackProps {
   readonly prefix: string;
   readonly accountCoreId: string;
-  readonly stackCoreBucketName: string;
+  readonly stackCoreInputBucketName: string;
+  readonly stackCoreOutputBucketName: string;
+  readonly coreS3AccessRoleArn?: string; // ARN of Core account S3 access role to assume
   readonly region: string;
-  readonly inputPrefix?: string; // S3 prefix for input files (default: 'input/')
-  readonly outputPrefix?: string; // S3 prefix for output files (default: 'output/')
-  readonly deploymentPrefix?: string; // Optional deployment-specific subdirectory (e.g., 'john' → 'input/john/')
+  readonly deploymentPrefix?: string; // Optional deployment-specific subdirectory (e.g., 'john')
   readonly existingEventBusName?: string; // If provided, use shared event bus (for multi-deployment dev environments)
 }
 
@@ -35,13 +35,16 @@ export class StackRps extends cdk.Stack {
     const {
       prefix,
       accountCoreId,
-      stackCoreBucketName,
+      stackCoreInputBucketName,
+      stackCoreOutputBucketName,
+      coreS3AccessRoleArn,
       region,
-      inputPrefix = 'input/',
-      outputPrefix = 'output/',
       deploymentPrefix,
       existingEventBusName,
     } = props;
+
+    // Construct Core S3 Access Role ARN if not provided
+    const s3AccessRoleArn = coreS3AccessRoleArn || `arn:aws:iam::${accountCoreId}:role/${prefix}-s3-access-role`;
 
     // Validate required props
     if (!prefix || prefix.trim().length === 0) {
@@ -50,17 +53,14 @@ export class StackRps extends cdk.Stack {
     if (!/^\d{12}$/.test(accountCoreId)) {
       throw new Error(`StackRps: accountCoreId must be a 12-digit AWS account ID, got: ${accountCoreId}`);
     }
-    if (!stackCoreBucketName || stackCoreBucketName.trim().length === 0) {
-      throw new Error('StackRps: stackCoreBucketName is required and cannot be empty');
+    if (!stackCoreInputBucketName || stackCoreInputBucketName.trim().length === 0) {
+      throw new Error('StackRps: stackCoreInputBucketName is required and cannot be empty');
+    }
+    if (!stackCoreOutputBucketName || stackCoreOutputBucketName.trim().length === 0) {
+      throw new Error('StackRps: stackCoreOutputBucketName is required and cannot be empty');
     }
     if (!region || region.trim().length === 0) {
       throw new Error('StackRps: region is required and cannot be empty');
-    }
-    if (!inputPrefix.endsWith('/')) {
-      throw new Error(`StackRps: inputPrefix must end with '/', got: ${inputPrefix}`);
-    }
-    if (!outputPrefix.endsWith('/')) {
-      throw new Error(`StackRps: outputPrefix must end with '/', got: ${outputPrefix}`);
     }
     if (deploymentPrefix && deploymentPrefix.includes('/')) {
       throw new Error(`StackRps: deploymentPrefix must not contain '/', got: ${deploymentPrefix}`);
@@ -146,53 +146,14 @@ export class StackRps extends cdk.Stack {
       }),
     );
 
-    // Grant Lambda access to read from input prefix and write to output prefix in Core Stack bucket
+    // Grant Lambda permission to assume Core S3 Access Role
+    // All S3 and KMS permissions are centralized in the Core account role
     lambdaRole.addToPolicy(
       new iam.PolicyStatement({
-        sid: 'ReadFromStackCoreBucket',
+        sid: 'AssumeCoreS3AccessRole',
         effect: iam.Effect.ALLOW,
-        actions: ['s3:GetObject', 's3:ListBucket'],
-        resources: [
-          `arn:aws:s3:::${stackCoreBucketName}`,
-          `arn:aws:s3:::${stackCoreBucketName}/${inputPrefix}*`,
-        ],
-      }),
-    );
-
-    lambdaRole.addToPolicy(
-      new iam.PolicyStatement({
-        sid: 'WriteToStackCoreBucket',
-        effect: iam.Effect.ALLOW,
-        actions: ['s3:PutObject', 's3:PutObjectAcl'],
-        resources: [`arn:aws:s3:::${stackCoreBucketName}/${outputPrefix}*`],
-      }),
-    );
-
-    // Grant Lambda access to KMS key for encryption/decryption (cross-account)
-    // Restricted to: Core account keys only, via S3 service, for specific bucket prefixes
-    lambdaRole.addToPolicy(
-      new iam.PolicyStatement({
-        sid: 'DecryptStackCoreBucket',
-        effect: iam.Effect.ALLOW,
-        actions: [
-          'kms:Decrypt',
-          'kms:DescribeKey',
-          'kms:GenerateDataKey', // Required for writing to encrypted S3
-        ],
-        resources: [
-          `arn:aws:kms:${region}:${accountCoreId}:key/*`,
-        ],
-        conditions: {
-          StringEquals: {
-            'kms:ViaService': `s3.${region}.amazonaws.com`,
-          },
-          StringLike: {
-            'kms:EncryptionContext:aws:s3:arn': [
-              `arn:aws:s3:::${stackCoreBucketName}/${inputPrefix}*`,
-              `arn:aws:s3:::${stackCoreBucketName}/${outputPrefix}*`,
-            ],
-          },
-        },
+        actions: ['sts:AssumeRole'],
+        resources: [s3AccessRoleArn],
       }),
     );
 
@@ -224,10 +185,10 @@ export class StackRps extends cdk.Stack {
       memorySize: 512,
       role: lambdaRole,
       environment: {
-        BUCKET_NAME: stackCoreBucketName,
+        INPUT_BUCKET_NAME: stackCoreInputBucketName,
+        OUTPUT_BUCKET_NAME: stackCoreOutputBucketName,
         PREFIX: prefix,
-        INPUT_PREFIX: inputPrefix,
-        OUTPUT_PREFIX: outputPrefix,
+        CORE_S3_ACCESS_ROLE_ARN: s3AccessRoleArn, // Role to assume for Core S3 access
         ...(deploymentPrefix && { CDK_DEPLOYMENT_PREFIX: deploymentPrefix }),
         POWERTOOLS_SERVICE_NAME: `${resourcePrefix}-processor`,
         LOG_LEVEL: 'INFO',
@@ -356,17 +317,10 @@ export class StackRps extends cdk.Stack {
     grantCoreAccountPermission.node.addDependency(ensureEventBus);
 
     // Create EventBridge rule to receive events from Core Account
-    // Multi-deployment isolation via optional deployment prefix:
-    // - With deploymentPrefix='john': filters by "input/john/" → processes only john's files
-    // - Without deploymentPrefix: filters by "input/" → processes all input/ events
-    //   (Lambda will skip subdirectories to avoid processing other deployments' files)
-    const objectKeyPrefix = deploymentPrefix ? `${inputPrefix}${deploymentPrefix}/` : inputPrefix;
-
+    // Filters events from the input bucket only
     const s3EventRule = new events.Rule(this, 'S3EventFromCoreAccount', {
       ruleName: `${resourcePrefix}-receive-s3-events`,
-      description: deploymentPrefix
-        ? `Receives S3 events from Core Account for ${resourcePrefix} (filters by ${objectKeyPrefix})`
-        : `Receives S3 events from Core Account for ${resourcePrefix} (processes ${inputPrefix} root files only)`,
+      description: `Receives S3 events from Core Account input bucket for ${resourcePrefix}`,
       eventBus: this.eventBus,
       eventPattern: {
         account: [accountCoreId],
@@ -374,10 +328,7 @@ export class StackRps extends cdk.Stack {
         detailType: ['Object Created'],
         detail: {
           bucket: {
-            name: [stackCoreBucketName],
-          },
-          object: {
-            key: [{ prefix: objectKeyPrefix }],
+            name: [stackCoreInputBucketName],
           },
         },
       },

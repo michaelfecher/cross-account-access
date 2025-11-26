@@ -10,14 +10,14 @@ This document defines what each team must provide and what they consume from the
 │  (Account: Core)    │◄────────┤ (Account: RPS)      │
 │                     │         │                     │
 │  Provides:          │         │  Provides:          │
-│  ✓ S3 Bucket        │         │  ✓ Lambda Processor │
-│  ✓ KMS Key          │         │  ✓ IAM Role (named) │
-│  ✓ EventBridge Rule │         │  ✓ Event Bus Policy │
-│                     │         │  ✓ Processing Logic │
-│  Consumes:          │         │                     │
-│  ✓ Lambda Role Name │         │  Consumes:          │
-│  ✓ Event Bus ARN    │         │  ✓ S3 Bucket Name   │
-│                     │         │  ✓ KMS Permissions  │
+│  ✓ Input Bucket     │         │  ✓ Lambda Processor │
+│  ✓ Output Bucket    │         │  ✓ IAM Role (named) │
+│  ✓ KMS Keys         │         │  ✓ Event Bus Policy │
+│  ✓ EventBridge Rule │         │  ✓ Processing Logic │
+│                     │         │                     │
+│  Consumes:          │         │  Consumes:          │
+│  ✓ Lambda Role Name │         │  ✓ Bucket Names     │
+│  ✓ Event Bus ARN    │         │  ✓ KMS Permissions  │
 └─────────────────────┘         └─────────────────────┘
 ```
 
@@ -29,24 +29,28 @@ This document defines what each team must provide and what they consume from the
 
 The Core team **MUST** provide these resources with **exact naming**:
 
-#### 1. S3 Bucket (CRITICAL - Must Follow Naming)
+#### 1. S3 Buckets (CRITICAL - Must Follow Naming)
 
-**Format:** `{prefix}-core-test-bucket-{coreAccountId}-{region}`
+**Input Bucket Format:** `{prefix}-core-input-bucket-{coreAccountId}-{region}`
 
-**Example:** `alice-core-test-bucket-111111111111-eu-west-1`
+**Output Bucket Format:** `{prefix}-core-output-bucket-{coreAccountId}-{region}`
 
-**Why:** RPS team constructs this name in code - no runtime lookup
+**Example:**
+- Input: `alice-core-input-bucket-111111111111-eu-west-1`
+- Output: `alice-core-output-bucket-111111111111-eu-west-1`
 
-**Code Location:** Core: `stack-core.ts`, line 62
+**Why:** RPS team constructs these names in code - no runtime lookup
+
+**Code Location:** Core: `stack-core.ts`, line 62-70
 
 **Required Configuration:**
-- ✅ EventBridge notifications enabled
-- ✅ KMS encryption
-- ✅ Bucket policy allows RPS Lambda role
-- ✅ Supports `input/` prefix (RPS reads)
-- ✅ Supports `output/` prefix (RPS writes)
+- ✅ Input bucket: EventBridge notifications enabled
+- ✅ Input bucket: KMS encryption
+- ✅ Input bucket: Bucket policy allows RPS Lambda role to read
+- ✅ Output bucket: KMS encryption
+- ✅ Output bucket: Bucket policy allows RPS Lambda role to write
 
-**Bucket Policy MUST Include:**
+**Input Bucket Policy MUST Include:**
 ```json
 {
   "Sid": "AllowAccountRpsLambdaRead",
@@ -56,10 +60,14 @@ The Core team **MUST** provide these resources with **exact naming**:
   },
   "Action": ["s3:GetObject", "s3:ListBucket"],
   "Resource": [
-    "arn:aws:s3:::{bucketName}",
-    "arn:aws:s3:::{bucketName}/input/*"
+    "arn:aws:s3:::{inputBucketName}",
+    "arn:aws:s3:::{inputBucketName}/*"
   ]
-},
+}
+```
+
+**Output Bucket Policy MUST Include:**
+```json
 {
   "Sid": "AllowAccountRpsLambdaWrite",
   "Effect": "Allow",
@@ -67,15 +75,15 @@ The Core team **MUST** provide these resources with **exact naming**:
     "AWS": "arn:aws:iam::{rpsAccountId}:role/{prefix}-processor-lambda-role"
   },
   "Action": ["s3:PutObject", "s3:PutObjectAcl"],
-  "Resource": ["arn:aws:s3:::{bucketName}/output/*"]
+  "Resource": ["arn:aws:s3:::{outputBucketName}/*"]
 }
 ```
 
-#### 2. KMS Key Policy (CRITICAL - Must Allow RPS)
+#### 2. KMS Key Policies (CRITICAL - Must Allow RPS)
 
-**Why:** RPS Lambda needs to decrypt (read) and encrypt (write) S3 objects
+**Why:** RPS Lambda needs to decrypt (read from input bucket) and encrypt (write to output bucket) S3 objects
 
-**Required Policy Statement:**
+**Required Policy Statement (for both input and output bucket KMS keys):**
 ```json
 {
   "Sid": "AllowAccountRpsLambdaDecrypt",
@@ -96,7 +104,7 @@ The Core team **MUST** provide these resources with **exact naming**:
 }
 ```
 
-**Note:** RPS team doesn't need the KMS Key ARN - permission is granted at account level
+**Note:** RPS team doesn't need the KMS Key ARNs - permission is granted at account level
 
 #### 3. EventBridge Rule (Cross-Account Sender)
 
@@ -109,10 +117,7 @@ The Core team **MUST** provide these resources with **exact naming**:
   "detail-type": ["Object Created"],
   "detail": {
     "bucket": {
-      "name": ["{bucketName}"]
-    },
-    "object": {
-      "key": [{"prefix": "input/"}]
+      "name": ["{inputBucketName}"]
     }
   }
 }
@@ -150,14 +155,17 @@ The RPS team **MUST** provide these resources with **exact naming**:
       "Effect": "Allow",
       "Action": ["s3:GetObject", "s3:ListBucket"],
       "Resource": [
-        "arn:aws:s3:::{bucketName}",
-        "arn:aws:s3:::{bucketName}/input/*"
+        "arn:aws:s3:::{inputBucketName}",
+        "arn:aws:s3:::{inputBucketName}/*"
       ]
     },
     {
       "Effect": "Allow",
       "Action": ["s3:PutObject", "s3:PutObjectAcl"],
-      "Resource": ["arn:aws:s3:::{bucketName}/output/*"]
+      "Resource": [
+        "arn:aws:s3:::{outputBucketName}",
+        "arn:aws:s3:::{outputBucketName}/*"
+      ]
     },
     {
       "Effect": "Allow",
@@ -220,12 +228,14 @@ The RPS team **MUST** provide these resources with **exact naming**:
 | **Account ID** | Static | Known/configured | `111111111111` |
 | **Region** | Static | Known/configured | `eu-west-1` |
 | **Prefix** | Coordinated | Agree upfront | `alice` |
-| **Bucket Name** | Constructed | Calculate: `{prefix}-core-test-bucket-{coreId}-{region}` | `alice-core-test-bucket-111111111111-eu-west-1` |
+| **Input Bucket Name** | Constructed | Calculate: `{prefix}-core-input-bucket-{coreId}-{region}` | `alice-core-input-bucket-111111111111-eu-west-1` |
+| **Output Bucket Name** | Constructed | Calculate: `{prefix}-core-output-bucket-{coreId}-{region}` | `alice-core-output-bucket-111111111111-eu-west-1` |
 
-**How RPS constructs bucket name in code:**
+**How RPS constructs bucket names in code:**
 ```typescript
-// RPS: src/main.ts, line 36
-const stackCoreBucketName = `${prefix}-core-test-bucket-${accountCoreId}-${region}`;
+// RPS: src/main.ts, line 36-37
+const inputBucketName = `${prefix}-core-input-bucket-${accountCoreId}-${region}`;
+const outputBucketName = `${prefix}-core-output-bucket-${accountCoreId}-${region}`;
 ```
 
 ### What Core Team Needs From RPS Team
@@ -373,7 +383,8 @@ After both teams deploy:
 
 ```bash
 # Core team checks
-aws s3 ls s3://${PREFIX}-core-test-bucket-${ACCOUNT_CORE_ID}-${REGION}/
+aws s3 ls s3://${PREFIX}-core-input-bucket-${ACCOUNT_CORE_ID}-${REGION}/
+aws s3 ls s3://${PREFIX}-core-output-bucket-${ACCOUNT_CORE_ID}-${REGION}/
 
 aws events describe-rule --name ${PREFIX}-s3-input-events --region ${REGION} --profile core-account
 
@@ -384,11 +395,11 @@ aws iam get-role --role-name ${PREFIX}-processor-lambda-role --profile rps-accou
 
 # Test end-to-end
 aws s3 cp test-data/sample-input.txt \
-  s3://${PREFIX}-core-test-bucket-${ACCOUNT_CORE_ID}-${REGION}/input/test-$(date +%s).txt \
+  s3://${PREFIX}-core-input-bucket-${ACCOUNT_CORE_ID}-${REGION}/test-$(date +%s).txt \
   --profile core-account
 
 # Wait 30 seconds, then check output
-aws s3 ls s3://${PREFIX}-core-test-bucket-${ACCOUNT_CORE_ID}-${REGION}/output/ --profile core-account
+aws s3 ls s3://${PREFIX}-core-output-bucket-${ACCOUNT_CORE_ID}-${REGION}/ --profile core-account
 ```
 
 ---
@@ -456,8 +467,8 @@ cdk deploy ticket-1234-StackRps --profile rps-account
 # Check Lambda role name
 aws iam get-role --role-name ${PREFIX}-processor-lambda-role --profile rps-account | jq '.Role.RoleName'
 
-# Check Core bucket policy
-aws s3api get-bucket-policy --bucket ${PREFIX}-core-test-bucket-${ACCOUNT_CORE_ID}-${REGION} --profile core-account | jq -r '.Policy' | jq '.Statement[] | select(.Sid | contains("AllowAccountRpsLambda"))'
+# Check Core input bucket policy
+aws s3api get-bucket-policy --bucket ${PREFIX}-core-input-bucket-${ACCOUNT_CORE_ID}-${REGION} --profile core-account | jq -r '.Policy' | jq '.Statement[] | select(.Sid | contains("AllowAccountRpsLambda"))'
 ```
 
 ### Issue: Events Not Crossing Accounts
@@ -505,7 +516,9 @@ export PREFIX=agreed-value
 2. **Account IDs** - Core and RPS IDs must be correct
 3. **Region** - Must be the same for both stacks
 4. **Lambda Role Name** - RPS must use: `{prefix}-processor-lambda-role`
-5. **Bucket Name** - Must follow: `{prefix}-core-test-bucket-{coreId}-{region}`
+5. **Bucket Names** - Must follow:
+   - Input: `{prefix}-core-input-bucket-{coreId}-{region}`
+   - Output: `{prefix}-core-output-bucket-{coreId}-{region}`
 
 ### ✅ Automatically Handled
 

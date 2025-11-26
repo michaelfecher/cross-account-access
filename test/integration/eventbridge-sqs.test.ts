@@ -73,8 +73,8 @@ describe('EventBridge to SQS Integration in RPS Account', () => {
   });
 
   test('Should route S3 event from EventBridge to SQS queue', async () => {
-    const testBucketName = `${PREFIX}-core-test-bucket-${ACCOUNT_CORE_ID}-${REGION}`;
-    const testObjectKey = 'input/integration-test.txt';
+    const testBucketName = `${PREFIX}-core-input-bucket-${ACCOUNT_CORE_ID}-${REGION}`;
+    const testObjectKey = 'integration-test.txt';
     const testEventId = `sqs-test-${Date.now()}`;
 
     // Step 1: Send test event to RPS Account's EventBridge (simulating cross-account event)

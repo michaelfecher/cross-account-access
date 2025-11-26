@@ -11,17 +11,20 @@ export interface StackCoreProps extends cdk.StackProps {
   readonly prefix: string;
   readonly accountRpsId: string;
   readonly region: string;
-  readonly inputPrefix?: string; // S3 prefix for input files (default: 'input/')
 }
 
 export class StackCore extends cdk.Stack {
-  public readonly bucket: s3.IBucket;
-  public readonly bucketName: string;
+  public readonly inputBucket: s3.IBucket;
+  public readonly outputBucket: s3.IBucket;
+  public readonly inputBucketName: string;
+  public readonly outputBucketName: string;
+  public readonly s3AccessRole: iam.IRole;
+  public readonly s3AccessRoleArn: string;
 
   constructor(scope: Construct, id: string, props: StackCoreProps) {
     super(scope, id, props);
 
-    const { prefix, accountRpsId, region, inputPrefix = 'input/' } = props;
+    const { prefix, accountRpsId, region } = props;
 
     // Validate required props
     if (!prefix || prefix.trim().length === 0) {
@@ -33,17 +36,21 @@ export class StackCore extends cdk.Stack {
     if (!region || region.trim().length === 0) {
       throw new Error('StackCore: region is required and cannot be empty');
     }
-    if (!inputPrefix.endsWith('/')) {
-      throw new Error(`StackCore: inputPrefix must end with '/', got: ${inputPrefix}`);
-    }
 
     // Security: Different principal strategies based on environment
-    // - Dev: AccountPrincipal (allows all deployment roles: dev-*, dev-john-*, dev-alice-*)
+    // - Dev: Wildcard pattern matching processor Lambda roles only
+    //   Allows: dev-processor-lambda-role, dev-john-processor-lambda-role, dev-alice-processor-lambda-role
+    //   Denies: Any other role in RPS account (dev-other-service-role, etc.)
     // - Preprod/Prod: Specific role ARN only (no deployment prefixes allowed)
     const isDev = prefix.toLowerCase().includes('dev');
 
     const rpsPrincipal = isDev
-      ? new iam.AccountPrincipal(accountRpsId) // Dev: Allow entire RPS account
+      ? new iam.CompositePrincipal(
+        // Allow base deployment role (e.g., dev-processor-lambda-role)
+        new iam.ArnPrincipal(`arn:aws:iam::${accountRpsId}:role/${prefix}-processor-lambda-role`),
+        // Allow deployment-specific roles (e.g., dev-john-processor-lambda-role, dev-alice-processor-lambda-role)
+        new iam.ArnPrincipal(`arn:aws:iam::${accountRpsId}:role/${prefix}-*-processor-lambda-role`),
+      )
       : new iam.ArnPrincipal(`arn:aws:iam::${accountRpsId}:role/${prefix}-processor-lambda-role`); // Prod: Specific role only
 
     // Environment-based retention policies
@@ -59,26 +66,8 @@ export class StackCore extends cdk.Stack {
       removalPolicy,
     });
 
-    // Grant RPS Account Lambda roles access to the KMS key for read and write
-    // Uses account principal with S3 service condition for security
-    bucketKey.addToResourcePolicy(
-      new iam.PolicyStatement({
-        sid: 'AllowAccountRpsLambdaDecrypt',
-        effect: iam.Effect.ALLOW,
-        principals: [rpsPrincipal],
-        actions: [
-          'kms:Decrypt',
-          'kms:DescribeKey',
-          'kms:GenerateDataKey', // Required for writing to encrypted S3
-        ],
-        resources: ['*'],
-        conditions: {
-          StringEquals: {
-            'kms:ViaService': `s3.${region}.amazonaws.com`,
-          },
-        },
-      }),
-    );
+    // KMS permissions are now granted to S3AccessRole (see below after bucket creation)
+    // No direct cross-account KMS key policy needed
 
     // Create access logs bucket
     const accessLogsBucket = new s3.Bucket(this, 'AccessLogsBucket', {
@@ -114,16 +103,16 @@ export class StackCore extends cdk.Stack {
       }),
     );
 
-    // Create main S3 bucket with security best practices
-    this.bucket = new s3.Bucket(this, 'Bucket', {
-      bucketName: `${prefix}-core-test-bucket-${this.account}-${region}`,
+    // Create input S3 bucket with security best practices
+    this.inputBucket = new s3.Bucket(this, 'InputBucket', {
+      bucketName: `${prefix}-core-input-bucket-${this.account}-${region}`,
       encryption: s3.BucketEncryption.KMS,
       encryptionKey: bucketKey,
       blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
       versioned: true,
       enforceSSL: true,
       serverAccessLogsBucket: accessLogsBucket,
-      serverAccessLogsPrefix: 'access-logs/',
+      serverAccessLogsPrefix: 'input-bucket-logs/',
       removalPolicy,
       autoDeleteObjects: isDev, // Only auto-delete in dev
       eventBridgeEnabled: true, // Enable EventBridge notifications
@@ -135,70 +124,136 @@ export class StackCore extends cdk.Stack {
       ],
     });
 
-    this.bucketName = this.bucket.bucketName;
+    this.inputBucketName = this.inputBucket.bucketName;
+
+    // Create output S3 bucket with security best practices
+    this.outputBucket = new s3.Bucket(this, 'OutputBucket', {
+      bucketName: `${prefix}-core-output-bucket-${this.account}-${region}`,
+      encryption: s3.BucketEncryption.KMS,
+      encryptionKey: bucketKey,
+      blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
+      versioned: true,
+      enforceSSL: true,
+      serverAccessLogsBucket: accessLogsBucket,
+      serverAccessLogsPrefix: 'output-bucket-logs/',
+      removalPolicy,
+      autoDeleteObjects: isDev, // Only auto-delete in dev
+      eventBridgeEnabled: false, // No events needed for output bucket
+      lifecycleRules: [
+        {
+          id: 'DeleteOldVersions',
+          noncurrentVersionExpiration: cdk.Duration.days(30),
+        },
+      ],
+    });
+
+    this.outputBucketName = this.outputBucket.bucketName;
+
+    // Create S3 Access Role in Core Account for RPS Lambda to assume
+    // This centralizes all S3 permissions in the Core account
+    // Note: Wildcards in ARNs aren't supported in IAM trust policies, so we use StringLike condition
+    this.s3AccessRole = new iam.Role(this, 'S3AccessRole', {
+      roleName: `${prefix}-s3-access-role`,
+      description: `Role for RPS Lambda to access ${prefix} S3 bucket via AssumeRole`,
+      // Trust policy: Allow RPS Lambda roles to assume this role
+      assumedBy: isDev
+        ? new iam.AccountPrincipal(accountRpsId) // Placeholder for dev, will be customized below
+        : new iam.ArnPrincipal(`arn:aws:iam::${accountRpsId}:role/${prefix}-processor-lambda-role`), // Prod: Specific role only
+      maxSessionDuration: cdk.Duration.hours(1),
+    });
+
+    // For dev: Add StringLike condition to restrict which roles can assume
+    // Allows: dev-processor-lambda-role, dev-john-processor-lambda-role, dev-alice-processor-lambda-role
+    // Denies: Any other role in RPS account
+    if (isDev) {
+      const cfnRole = this.s3AccessRole.node.defaultChild as iam.CfnRole;
+      cfnRole.assumeRolePolicyDocument = {
+        Version: '2012-10-17',
+        Statement: [
+          {
+            Effect: 'Allow',
+            Principal: {
+              AWS: `arn:aws:iam::${accountRpsId}:root`, // AccountPrincipal format
+            },
+            Action: 'sts:AssumeRole',
+            Condition: {
+              StringLike: {
+                'aws:PrincipalArn': [
+                  `arn:aws:iam::${accountRpsId}:role/${prefix}-processor-lambda-role`, // Base role
+                  `arn:aws:iam::${accountRpsId}:role/${prefix}-*-processor-lambda-role`, // Deployment-specific roles
+                ],
+              },
+            },
+          },
+        ],
+      };
+    }
+
+    this.s3AccessRoleArn = this.s3AccessRole.roleArn;
+
+    // Grant S3 permissions to the S3AccessRole (adds to role policy, NOT bucket policy)
+    // Since role is in same account as buckets, no bucket policy needed
+    this.inputBucket.grantRead(this.s3AccessRole); // Read entire input bucket
+    this.outputBucket.grantWrite(this.s3AccessRole); // Write entire output bucket
+
+    // Grant KMS permissions to the S3AccessRole (shared key for both buckets)
+    bucketKey.grantDecrypt(this.s3AccessRole);
+    bucketKey.grantEncryptDecrypt(this.s3AccessRole);
 
     // Explicit deny for public access (defense in depth)
-    // Allows: same account, RPS account, AWS services
-    this.bucket.addToResourcePolicy(
+    // Only allows: Core account (S3AccessRole is in this account)
+    this.inputBucket.addToResourcePolicy(
       new iam.PolicyStatement({
         sid: 'DenyPublicAccess',
         effect: iam.Effect.DENY,
         principals: [new iam.AnyPrincipal()],
         actions: ['s3:*'],
         resources: [
-          this.bucket.bucketArn,
-          `${this.bucket.bucketArn}/*`,
+          this.inputBucket.bucketArn,
+          `${this.inputBucket.bucketArn}/*`,
         ],
         conditions: {
           Bool: {
             'aws:PrincipalIsAWSService': 'false',
           },
           StringNotEquals: {
-            'aws:PrincipalAccount': [this.account, accountRpsId],
+            'aws:PrincipalAccount': [this.account], // Only Core account
           },
         },
       }),
     );
 
-    // Grant RPS Account Lambda role access to the bucket
-    // Read access to input/* and write access to output/*
-    // Uses account principal to support all deployment Lambda roles
-    this.bucket.addToResourcePolicy(
+    this.outputBucket.addToResourcePolicy(
       new iam.PolicyStatement({
-        sid: 'AllowAccountRpsLambdaRead',
-        effect: iam.Effect.ALLOW,
-        principals: [rpsPrincipal],
-        actions: ['s3:GetObject', 's3:ListBucket'],
+        sid: 'DenyPublicAccess',
+        effect: iam.Effect.DENY,
+        principals: [new iam.AnyPrincipal()],
+        actions: ['s3:*'],
         resources: [
-          this.bucket.bucketArn,
-          `${this.bucket.bucketArn}/input/*`,
+          this.outputBucket.bucketArn,
+          `${this.outputBucket.bucketArn}/*`,
         ],
+        conditions: {
+          Bool: {
+            'aws:PrincipalIsAWSService': 'false',
+          },
+          StringNotEquals: {
+            'aws:PrincipalAccount': [this.account], // Only Core account
+          },
+        },
       }),
     );
 
-    this.bucket.addToResourcePolicy(
-      new iam.PolicyStatement({
-        sid: 'AllowAccountRpsLambdaWrite',
-        effect: iam.Effect.ALLOW,
-        principals: [rpsPrincipal],
-        actions: ['s3:PutObject', 's3:PutObjectAcl'],
-        resources: [`${this.bucket.bucketArn}/output/*`],
-      }),
-    );
-
-    // Create EventBridge rule for S3 ObjectCreated events on input prefix
+    // Create EventBridge rule for S3 ObjectCreated events on input bucket
     const s3EventRule = new events.Rule(this, 'S3InputEventRule', {
       ruleName: `${prefix}-s3-input-events`,
-      description: `Captures S3 ObjectCreated events for ${prefix} bucket ${inputPrefix} prefix`,
+      description: `Captures S3 ObjectCreated events for ${prefix} input bucket`,
       eventPattern: {
         source: ['aws.s3'],
         detailType: ['Object Created'],
         detail: {
           bucket: {
-            name: [this.bucket.bucketName],
-          },
-          object: {
-            key: [{ prefix: inputPrefix }],
+            name: [this.inputBucket.bucketName],
           },
         },
       },
@@ -267,28 +322,87 @@ export class StackCore extends cdk.Stack {
     );
 
     NagSuppressions.addResourceSuppressions(
-      this.bucket,
+      this.inputBucket,
       [
         {
           id: 'AwsSolutions-S5',
           reason:
-            'Bucket policy allows cross-account access from RPS Lambda with StringLike condition on role name pattern',
+            'Input bucket policy includes defense-in-depth deny for public access',
+        },
+      ],
+      true,
+    );
+
+    NagSuppressions.addResourceSuppressions(
+      this.outputBucket,
+      [
+        {
+          id: 'AwsSolutions-S5',
+          reason:
+            'Output bucket policy includes defense-in-depth deny for public access',
+        },
+      ],
+      true,
+    );
+
+    // Suppress IAM5 for S3AccessRole - wildcard permissions are necessary for S3 bucket access
+    NagSuppressions.addResourceSuppressions(
+      this.s3AccessRole,
+      [
+        {
+          id: 'AwsSolutions-IAM5',
+          reason: 'S3 wildcard permissions required for bucket access (read input bucket, write output bucket)',
+          appliesTo: [
+            'Action::s3:GetBucket*',
+            'Action::s3:GetObject*',
+            'Action::s3:List*',
+            'Action::s3:Abort*',
+            'Action::s3:DeleteObject*',
+            { regex: '/Resource::<InputBucket.*\\.Arn>/\\*/g' },
+            { regex: '/Resource::<OutputBucket.*\\.Arn>/\\*/g' },
+          ],
+        },
+        {
+          id: 'AwsSolutions-IAM5',
+          reason: 'KMS wildcard permissions required for S3 encryption operations',
+          appliesTo: [
+            'Action::kms:GenerateDataKey*',
+            'Action::kms:ReEncrypt*',
+          ],
         },
       ],
       true,
     );
 
     // Outputs
-    new cdk.CfnOutput(this, 'BucketName', {
-      value: this.bucket.bucketName,
-      description: 'Name of the S3 bucket',
-      exportName: `${prefix}-StackCore-BucketName`,
+    new cdk.CfnOutput(this, 'InputBucketName', {
+      value: this.inputBucket.bucketName,
+      description: 'Name of the input S3 bucket',
+      exportName: `${prefix}-StackCore-InputBucketName`,
     });
 
-    new cdk.CfnOutput(this, 'BucketArn', {
-      value: this.bucket.bucketArn,
-      description: 'ARN of the S3 bucket',
-      exportName: `${prefix}-StackCore-BucketArn`,
+    new cdk.CfnOutput(this, 'InputBucketArn', {
+      value: this.inputBucket.bucketArn,
+      description: 'ARN of the input S3 bucket',
+      exportName: `${prefix}-StackCore-InputBucketArn`,
+    });
+
+    new cdk.CfnOutput(this, 'OutputBucketName', {
+      value: this.outputBucket.bucketName,
+      description: 'Name of the output S3 bucket',
+      exportName: `${prefix}-StackCore-OutputBucketName`,
+    });
+
+    new cdk.CfnOutput(this, 'OutputBucketArn', {
+      value: this.outputBucket.bucketArn,
+      description: 'ARN of the output S3 bucket',
+      exportName: `${prefix}-StackCore-OutputBucketArn`,
+    });
+
+    new cdk.CfnOutput(this, 'S3AccessRoleArn', {
+      value: this.s3AccessRole.roleArn,
+      description: 'ARN of the S3 access role for RPS Lambda to assume',
+      exportName: `${prefix}-StackCore-S3AccessRoleArn`,
     });
   }
 

@@ -18,100 +18,138 @@ echo "Cross-Account Policy Verification"
 echo "=========================================="
 echo ""
 
-# Core S3 Bucket Policy
+# Core S3 Bucket Policies
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo "1. Core S3 Bucket Policy"
+echo "1. Core S3 Bucket Policies"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo "Checking if RPS Lambda can access Core S3 bucket..."
+echo "Checking if RPS Lambda can access Core S3 buckets..."
 echo ""
 
-BUCKET_POLICY=$(aws_core s3api get-bucket-policy \
-  --bucket "$BUCKET_NAME" \
+echo "Input Bucket: $INPUT_BUCKET_NAME"
+INPUT_BUCKET_POLICY=$(aws_core s3api get-bucket-policy \
+  --bucket "$INPUT_BUCKET_NAME" \
   --query 'Policy' \
-  --output text)
+  --output text 2>/dev/null || echo "{}")
 
-echo "Checking for: AllowAccountRpsLambdaRead"
-if echo "$BUCKET_POLICY" | jq -e '.Statement[] | select(.Sid == "AllowAccountRpsLambdaRead")' >/dev/null 2>&1; then
+echo "Checking for: AllowAccountRpsLambdaRead (Input Bucket)"
+if echo "$INPUT_BUCKET_POLICY" | jq -e '.Statement[] | select(.Sid == "AllowAccountRpsLambdaRead")' >/dev/null 2>&1; then
   echo "✓ Found AllowAccountRpsLambdaRead statement"
-  echo "$BUCKET_POLICY" | jq '.Statement[] | select(.Sid == "AllowAccountRpsLambdaRead") | {
+  echo "$INPUT_BUCKET_POLICY" | jq '.Statement[] | select(.Sid == "AllowAccountRpsLambdaRead") | {
     Actions: .Action,
     Resources: .Resource,
     Principal: .Principal,
     Condition: .Condition
   }'
 else
-  echo "✗ MISSING: AllowAccountRpsLambdaRead statement"
+  echo "✗ MISSING: AllowAccountRpsLambdaRead statement on input bucket"
 fi
 
 echo ""
-echo "Checking for: AllowAccountRpsLambdaWrite"
-if echo "$BUCKET_POLICY" | jq -e '.Statement[] | select(.Sid == "AllowAccountRpsLambdaWrite")' >/dev/null 2>&1; then
+echo "Output Bucket: $OUTPUT_BUCKET_NAME"
+OUTPUT_BUCKET_POLICY=$(aws_core s3api get-bucket-policy \
+  --bucket "$OUTPUT_BUCKET_NAME" \
+  --query 'Policy' \
+  --output text 2>/dev/null || echo "{}")
+
+echo "Checking for: AllowAccountRpsLambdaWrite (Output Bucket)"
+if echo "$OUTPUT_BUCKET_POLICY" | jq -e '.Statement[] | select(.Sid == "AllowAccountRpsLambdaWrite")' >/dev/null 2>&1; then
   echo "✓ Found AllowAccountRpsLambdaWrite statement"
-  echo "$BUCKET_POLICY" | jq '.Statement[] | select(.Sid == "AllowAccountRpsLambdaWrite") | {
+  echo "$OUTPUT_BUCKET_POLICY" | jq '.Statement[] | select(.Sid == "AllowAccountRpsLambdaWrite") | {
     Actions: .Action,
     Resources: .Resource,
     Principal: .Principal,
     Condition: .Condition
   }'
 else
-  echo "✗ MISSING: AllowAccountRpsLambdaWrite statement"
+  echo "✗ MISSING: AllowAccountRpsLambdaWrite statement on output bucket"
 fi
 
 echo ""
 echo "Expected principal pattern: arn:aws:iam::${RPS_ACCOUNT_ID}:role/*-processor-lambda-role"
 echo ""
 
-# Core KMS Key Policy
+# Core KMS Key Policies
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo "2. Core KMS Key Policy"
+echo "2. Core KMS Key Policies"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo "Checking if RPS Lambda can decrypt/encrypt with Core KMS key..."
+echo "Checking if RPS Lambda can decrypt/encrypt with Core KMS keys..."
 echo ""
 
-KEY_ID=$(aws_core s3api get-bucket-encryption \
-  --bucket "$BUCKET_NAME" \
+echo "Input Bucket KMS Key:"
+INPUT_KEY_ID=$(aws_core s3api get-bucket-encryption \
+  --bucket "$INPUT_BUCKET_NAME" \
   --query 'ServerSideEncryptionConfiguration.Rules[0].ApplyServerSideEncryptionByDefault.KMSMasterKeyID' \
   --output text 2>/dev/null || echo "None")
 
-if [ "$KEY_ID" != "None" ] && [ -n "$KEY_ID" ]; then
-  echo "KMS Key: $KEY_ID"
-  echo ""
+if [ "$INPUT_KEY_ID" != "None" ] && [ -n "$INPUT_KEY_ID" ]; then
+  echo "  KMS Key: $INPUT_KEY_ID"
 
-  KMS_POLICY=$(aws_core kms get-key-policy \
-    --key-id "$KEY_ID" \
+  INPUT_KMS_POLICY=$(aws_core kms get-key-policy \
+    --key-id "$INPUT_KEY_ID" \
     --policy-name default \
     --query 'Policy' \
     --output text)
 
-  if echo "$KMS_POLICY" | jq -e '.Statement[] | select(.Sid == "AllowAccountRpsLambdaDecrypt")' >/dev/null 2>&1; then
-    echo "✓ Found AllowAccountRpsLambdaDecrypt statement"
-    echo "$KMS_POLICY" | jq '.Statement[] | select(.Sid == "AllowAccountRpsLambdaDecrypt") | {
-      Actions: .Action,
-      Principal: .Principal,
-      Condition: .Condition
-    }'
-    echo ""
-    echo "Verifying conditions:"
+  if echo "$INPUT_KMS_POLICY" | jq -e '.Statement[] | select(.Sid == "AllowAccountRpsLambdaDecrypt")' >/dev/null 2>&1; then
+    echo "  ✓ Found AllowAccountRpsLambdaDecrypt statement"
 
     # Check kms:ViaService condition
-    if echo "$KMS_POLICY" | jq -e '.Statement[] | select(.Sid == "AllowAccountRpsLambdaDecrypt") | .Condition.StringEquals."kms:ViaService"' | grep -q "s3.${REGION}.amazonaws.com"; then
-      echo "  ✓ kms:ViaService restricted to S3"
+    if echo "$INPUT_KMS_POLICY" | jq -e '.Statement[] | select(.Sid == "AllowAccountRpsLambdaDecrypt") | .Condition.StringEquals."kms:ViaService"' | grep -q "s3.${REGION}.amazonaws.com"; then
+      echo "    ✓ kms:ViaService restricted to S3"
     else
-      echo "  ✗ kms:ViaService condition missing or incorrect"
+      echo "    ✗ kms:ViaService condition missing or incorrect"
     fi
 
     # Check principal ARN pattern
-    if echo "$KMS_POLICY" | jq -e '.Statement[] | select(.Sid == "AllowAccountRpsLambdaDecrypt") | .Condition.StringLike."aws:PrincipalArn"' | grep -q "*-processor-lambda-role"; then
-      echo "  ✓ Principal ARN pattern matches Lambda role"
+    if echo "$INPUT_KMS_POLICY" | jq -e '.Statement[] | select(.Sid == "AllowAccountRpsLambdaDecrypt") | .Condition.StringLike."aws:PrincipalArn"' | grep -q "*-processor-lambda-role"; then
+      echo "    ✓ Principal ARN pattern matches Lambda role"
     else
-      echo "  ✗ Principal ARN pattern missing or incorrect"
+      echo "    ✗ Principal ARN pattern missing or incorrect"
     fi
   else
-    echo "✗ MISSING: AllowAccountRpsLambdaDecrypt statement"
-    echo "  This will prevent Lambda from reading encrypted S3 objects"
+    echo "  ✗ MISSING: AllowAccountRpsLambdaDecrypt statement"
   fi
 else
-  echo "ℹ No KMS encryption configured (using default S3 encryption)"
+  echo "  ℹ No KMS encryption configured (using default S3 encryption)"
+fi
+
+echo ""
+echo "Output Bucket KMS Key:"
+OUTPUT_KEY_ID=$(aws_core s3api get-bucket-encryption \
+  --bucket "$OUTPUT_BUCKET_NAME" \
+  --query 'ServerSideEncryptionConfiguration.Rules[0].ApplyServerSideEncryptionByDefault.KMSMasterKeyID' \
+  --output text 2>/dev/null || echo "None")
+
+if [ "$OUTPUT_KEY_ID" != "None" ] && [ -n "$OUTPUT_KEY_ID" ]; then
+  echo "  KMS Key: $OUTPUT_KEY_ID"
+
+  OUTPUT_KMS_POLICY=$(aws_core kms get-key-policy \
+    --key-id "$OUTPUT_KEY_ID" \
+    --policy-name default \
+    --query 'Policy' \
+    --output text)
+
+  if echo "$OUTPUT_KMS_POLICY" | jq -e '.Statement[] | select(.Sid == "AllowAccountRpsLambdaDecrypt")' >/dev/null 2>&1; then
+    echo "  ✓ Found AllowAccountRpsLambdaDecrypt statement"
+
+    # Check kms:ViaService condition
+    if echo "$OUTPUT_KMS_POLICY" | jq -e '.Statement[] | select(.Sid == "AllowAccountRpsLambdaDecrypt") | .Condition.StringEquals."kms:ViaService"' | grep -q "s3.${REGION}.amazonaws.com"; then
+      echo "    ✓ kms:ViaService restricted to S3"
+    else
+      echo "    ✗ kms:ViaService condition missing or incorrect"
+    fi
+
+    # Check principal ARN pattern
+    if echo "$OUTPUT_KMS_POLICY" | jq -e '.Statement[] | select(.Sid == "AllowAccountRpsLambdaDecrypt") | .Condition.StringLike."aws:PrincipalArn"' | grep -q "*-processor-lambda-role"; then
+      echo "    ✓ Principal ARN pattern matches Lambda role"
+    else
+      echo "    ✗ Principal ARN pattern missing or incorrect"
+    fi
+  else
+    echo "  ✗ MISSING: AllowAccountRpsLambdaDecrypt statement"
+  fi
+else
+  echo "  ℹ No KMS encryption configured (using default S3 encryption)"
 fi
 echo ""
 
@@ -246,10 +284,10 @@ for policy_name in $POLICIES; do
   if echo "$POLICY_DOC" | jq -e '.Statement[] | select(.Sid == "ReadFromStackCoreBucket")' >/dev/null 2>&1; then
     echo "✓ Found ReadFromStackCoreBucket"
 
-    if echo "$POLICY_DOC" | jq -e '.Statement[] | select(.Sid == "ReadFromStackCoreBucket") | .Resource[]' | grep -q "$BUCKET_NAME"; then
-      echo "  ✓ Bucket name matches"
+    if echo "$POLICY_DOC" | jq -e '.Statement[] | select(.Sid == "ReadFromStackCoreBucket") | .Resource[]' | grep -q "$INPUT_BUCKET_NAME"; then
+      echo "  ✓ Input bucket name matches"
     else
-      echo "  ✗ Bucket name mismatch"
+      echo "  ✗ Input bucket name mismatch"
     fi
   fi
 
@@ -257,10 +295,10 @@ for policy_name in $POLICIES; do
   if echo "$POLICY_DOC" | jq -e '.Statement[] | select(.Sid == "WriteToStackCoreBucket")' >/dev/null 2>&1; then
     echo "✓ Found WriteToStackCoreBucket"
 
-    if echo "$POLICY_DOC" | jq -e '.Statement[] | select(.Sid == "WriteToStackCoreBucket") | .Resource[]' | grep -q "$BUCKET_NAME/output"; then
-      echo "  ✓ Output prefix matches"
+    if echo "$POLICY_DOC" | jq -e '.Statement[] | select(.Sid == "WriteToStackCoreBucket") | .Resource[]' | grep -q "$OUTPUT_BUCKET_NAME"; then
+      echo "  ✓ Output bucket name matches"
     else
-      echo "  ✗ Output prefix mismatch"
+      echo "  ✗ Output bucket name mismatch"
     fi
   fi
 
@@ -289,11 +327,12 @@ echo "Policy Verification Summary"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo ""
 echo "Required cross-account policies:"
-echo "  1. Core S3 bucket → Allow RPS Lambda read/write"
-echo "  2. Core KMS key → Allow RPS Lambda decrypt/encrypt via S3"
-echo "  3. RPS Custom Event Bus → Allow Core account PutEvents"
-echo "  4. RPS SQS queue → Allow EventBridge SendMessage (with SourceArn)"
-echo "  5. RPS Lambda role → S3, KMS, SQS permissions"
+echo "  1. Core input bucket → Allow RPS Lambda read"
+echo "  2. Core output bucket → Allow RPS Lambda write"
+echo "  3. Core KMS keys → Allow RPS Lambda decrypt/encrypt via S3"
+echo "  4. RPS Custom Event Bus → Allow Core account PutEvents"
+echo "  5. RPS SQS queue → Allow EventBridge SendMessage (with SourceArn)"
+echo "  6. RPS Lambda role → S3, KMS, SQS permissions"
 echo ""
 echo "If any checks failed above, redeploy the affected stack"
 echo ""

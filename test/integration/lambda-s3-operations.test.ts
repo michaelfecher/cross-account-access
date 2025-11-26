@@ -1,8 +1,8 @@
 /**
  * Integration Test: Lambda S3 Read/Write Operations
  *
- * Purpose: Tests the Lambda function's ability to read from input/ prefix
- * and write to output/ prefix in Core Account's S3 bucket.
+ * Purpose: Tests the Lambda function's ability to read from input bucket
+ * and write to output bucket in Core Account.
  *
  * Prerequisites:
  * - Both Core Stack and RPS Stack must be deployed
@@ -10,9 +10,9 @@
  * - Set environment variables: ACCOUNT_CORE_ID, ACCOUNT_RPS_ID, PREFIX
  *
  * Test Flow:
- * 1. Upload a test file to the input/ prefix in Core Account's bucket
+ * 1. Upload a test file to the input bucket in Core Account
  * 2. Wait for the Lambda function to process it
- * 3. Verify the processed file appears in the output/ prefix
+ * 3. Verify the processed file appears in the output bucket
  * 4. Verify the content was processed correctly
  */
 
@@ -33,7 +33,8 @@ const PREFIX = process.env.PREFIX || 'dev';
 const ACCOUNT_CORE_ID = process.env.ACCOUNT_CORE_ID || '111111111111';
 const ACCOUNT_RPS_ID = process.env.ACCOUNT_RPS_ID || '222222222222';
 const REGION = 'eu-central-1';
-const BUCKET_NAME = `${PREFIX}-core-test-bucket-${ACCOUNT_CORE_ID}-${REGION}`;
+const INPUT_BUCKET_NAME = `${PREFIX}-core-input-bucket-${ACCOUNT_CORE_ID}-${REGION}`;
+const OUTPUT_BUCKET_NAME = `${PREFIX}-core-output-bucket-${ACCOUNT_CORE_ID}-${REGION}`;
 const LAMBDA_NAME = `${PREFIX}-s3-processor`;
 
 describe('Lambda S3 Cross-Account Operations', () => {
@@ -58,17 +59,17 @@ describe('Lambda S3 Cross-Account Operations', () => {
     lambdaClientRps.destroy();
   });
 
-  test('Should read from input/ and write to output/ prefix', async () => {
+  test('Should read from input bucket and write to output bucket', async () => {
     const timestamp = Date.now();
-    const inputKey = `input/test-${timestamp}.txt`;
-    const outputKey = `output/test-${timestamp}.txt`;
+    const inputKey = `test-${timestamp}.txt`;
+    const outputKey = `test-${timestamp}.txt`;
     const testContent = `Test content for integration test\nTimestamp: ${timestamp}\nTest scenario: Lambda S3 operations`;
 
-    // Step 1: Upload test file to input/ prefix in Core Account bucket
+    // Step 1: Upload test file to input bucket in Core Account
     console.log(`Uploading test file: ${inputKey}`);
 
     const putCommand = new PutObjectCommand({
-      Bucket: BUCKET_NAME,
+      Bucket: INPUT_BUCKET_NAME,
       Key: inputKey,
       Body: testContent,
       ContentType: 'text/plain',
@@ -91,11 +92,11 @@ describe('Lambda S3 Cross-Account Operations', () => {
             'account': ACCOUNT_CORE_ID,
             'time': new Date().toISOString(),
             'region': REGION,
-            'resources': [`arn:aws:s3:::${BUCKET_NAME}/${inputKey}`],
+            'resources': [`arn:aws:s3:::${INPUT_BUCKET_NAME}/${inputKey}`],
             'detail': {
               'version': '0',
               'bucket': {
-                name: BUCKET_NAME,
+                name: INPUT_BUCKET_NAME,
               },
               'object': {
                 key: inputKey,
@@ -155,7 +156,7 @@ describe('Lambda S3 Cross-Account Operations', () => {
 
       try {
         const headCommand = new HeadObjectCommand({
-          Bucket: BUCKET_NAME,
+          Bucket: OUTPUT_BUCKET_NAME,
           Key: outputKey,
         });
 
@@ -176,7 +177,7 @@ describe('Lambda S3 Cross-Account Operations', () => {
 
     // Step 5: Verify output file content
     const getCommand = new GetObjectCommand({
-      Bucket: BUCKET_NAME,
+      Bucket: OUTPUT_BUCKET_NAME,
       Key: outputKey,
     });
 
@@ -199,14 +200,14 @@ describe('Lambda S3 Cross-Account Operations', () => {
     // Cleanup: Delete test files
     await s3ClientCore.send(
       new DeleteObjectCommand({
-        Bucket: BUCKET_NAME,
+        Bucket: INPUT_BUCKET_NAME,
         Key: inputKey,
       }),
     );
 
     await s3ClientCore.send(
       new DeleteObjectCommand({
-        Bucket: BUCKET_NAME,
+        Bucket: OUTPUT_BUCKET_NAME,
         Key: outputKey,
       }),
     );
@@ -225,21 +226,21 @@ describe('Lambda S3 Cross-Account Operations', () => {
     // Verify function exists and is configured correctly
     expect(functionConfig.Configuration?.FunctionName).toBe(LAMBDA_NAME);
     expect(functionConfig.Configuration?.Runtime).toBe('nodejs20.x');
-    expect(functionConfig.Configuration?.Environment?.Variables?.BUCKET_NAME).toBe(BUCKET_NAME);
+    expect(functionConfig.Configuration?.Environment?.Variables?.INPUT_BUCKET_NAME).toBe(INPUT_BUCKET_NAME);
+    expect(functionConfig.Configuration?.Environment?.Variables?.OUTPUT_BUCKET_NAME).toBe(OUTPUT_BUCKET_NAME);
     expect(functionConfig.Configuration?.Environment?.Variables?.PREFIX).toBe(PREFIX);
 
     console.log('Lambda function configuration verified');
   });
 
-  test('Should verify Lambda cannot write to restricted prefixes', async () => {
+  test('Should verify Lambda cannot access restricted buckets', async () => {
     // This test verifies that the Lambda's IAM permissions are properly scoped
-    // It should NOT be able to write to prefixes other than output/
+    // It should NOT be able to access buckets other than input and output buckets
 
     const timestamp = Date.now();
-    const restrictedKey = `restricted/test-${timestamp}.txt`;
     const testContent = 'This should fail';
 
-    // Create a simulated event that tries to write to a restricted prefix
+    // Create a simulated event that tries to access a non-existent bucket
     const testEvent = {
       Records: [
         {
@@ -252,14 +253,14 @@ describe('Lambda S3 Cross-Account Operations', () => {
             'account': ACCOUNT_CORE_ID,
             'time': new Date().toISOString(),
             'region': REGION,
-            'resources': [`arn:aws:s3:::${BUCKET_NAME}/input/dummy.txt`],
+            'resources': [`arn:aws:s3:::non-existent-bucket/dummy.txt`],
             'detail': {
               'version': '0',
               'bucket': {
                 name: 'non-existent-bucket', // This should cause the Lambda to handle gracefully
               },
               'object': {
-                key: 'input/dummy.txt',
+                key: 'dummy.txt',
                 size: 100,
               },
               'request-id': `test-restricted-${timestamp}`,

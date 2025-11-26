@@ -9,7 +9,8 @@ export CDK_DEPLOYMENT_STAGE=dev
 export CORE_ACCOUNT_ID=111111111111
 export RPS_ACCOUNT_ID=222222222222
 export REGION=eu-west-1
-export BUCKET_NAME=${STAGE}-core-test-bucket-${CORE_ACCOUNT_ID}-${REGION}
+export INPUT_BUCKET_NAME=${STAGE}-core-input-bucket-${CORE_ACCOUNT_ID}-${REGION}
+export OUTPUT_BUCKET_NAME=${STAGE}-core-output-bucket-${CORE_ACCOUNT_ID}-${REGION}
 export QUEUE_NAME=${STAGE}-processor-queue
 export LAMBDA_NAME=${STAGE}-s3-processor
 ```
@@ -132,9 +133,9 @@ aws cloudwatch get-metric-statistics \
 Check if S3 actually sent an event to EventBridge:
 
 ```bash
-# Check S3 bucket has EventBridge notifications enabled
+# Check input bucket has EventBridge notifications enabled
 aws s3api get-bucket-notification-configuration \
-  --bucket ${BUCKET_NAME} \
+  --bucket ${INPUT_BUCKET_NAME} \
   --profile core-account
 
 # Should show: "EventBridgeConfiguration": {}
@@ -180,10 +181,7 @@ aws events list-targets-by-rule \
   "detail-type": ["Object Created"],
   "detail": {
     "bucket": {
-      "name": ["dev-core-test-bucket-111111111111-eu-west-1"]
-    },
-    "object": {
-      "key": [{"prefix": "input/"}]
+      "name": ["dev-core-input-bucket-111111111111-eu-west-1"]
     }
   }
 }
@@ -205,8 +203,8 @@ aws events put-events \
     {
       "Source": "aws.s3",
       "DetailType": "Object Created",
-      "Detail": "{\"version\":\"0\",\"bucket\":{\"name\":\"'${BUCKET_NAME}'\"},\"object\":{\"key\":\"input/test-debug.txt\",\"size\":1024},\"request-id\":\"test-'$(date +%s)'\"}",
-      "Resources": ["arn:aws:s3:::'${BUCKET_NAME}'/input/test-debug.txt"]
+      "Detail": "{\"version\":\"0\",\"bucket\":{\"name\":\"'${INPUT_BUCKET_NAME}'\"},\"object\":{\"key\":\"test-debug.txt\",\"size\":1024},\"request-id\":\"test-'$(date +%s)'\"}",
+      "Resources": ["arn:aws:s3:::'${INPUT_BUCKET_NAME}'/test-debug.txt"]
     }
   ]' \
   --region ${REGION} \
@@ -492,7 +490,7 @@ cat > /tmp/test-event.json <<EOF
   "Records": [
     {
       "messageId": "test-manual",
-      "body": "{\"version\":\"0\",\"id\":\"test-$(date +%s)\",\"detail-type\":\"Object Created\",\"source\":\"aws.s3\",\"account\":\"${CORE_ACCOUNT_ID}\",\"time\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",\"region\":\"${REGION}\",\"resources\":[\"arn:aws:s3:::${BUCKET_NAME}/input/test.txt\"],\"detail\":{\"version\":\"0\",\"bucket\":{\"name\":\"${BUCKET_NAME}\"},\"object\":{\"key\":\"input/manual-test.txt\",\"size\":100},\"request-id\":\"manual-test\"}}",
+      "body": "{\"version\":\"0\",\"id\":\"test-$(date +%s)\",\"detail-type\":\"Object Created\",\"source\":\"aws.s3\",\"account\":\"${CORE_ACCOUNT_ID}\",\"time\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",\"region\":\"${REGION}\",\"resources\":[\"arn:aws:s3:::${INPUT_BUCKET_NAME}/test.txt\"],\"detail\":{\"version\":\"0\",\"bucket\":{\"name\":\"${INPUT_BUCKET_NAME}\"},\"object\":{\"key\":\"manual-test.txt\",\"size\":100},\"request-id\":\"manual-test\"}}",
       "attributes": {},
       "messageAttributes": {},
       "md5OfBody": "",
@@ -506,7 +504,7 @@ EOF
 
 # First, create the test input file
 echo "Manual test file content" | aws s3 cp - \
-  s3://${BUCKET_NAME}/input/manual-test.txt \
+  s3://${INPUT_BUCKET_NAME}/manual-test.txt \
   --profile core-account
 
 # Invoke Lambda
@@ -521,15 +519,15 @@ aws lambda invoke \
 cat /tmp/lambda-response.json
 
 # Check if output file was created
-aws s3 ls s3://${BUCKET_NAME}/output/manual-test.txt --profile core-account
-aws s3 cp s3://${BUCKET_NAME}/output/manual-test.txt - --profile core-account
+aws s3 ls s3://${OUTPUT_BUCKET_NAME}/manual-test.txt --profile core-account
+aws s3 cp s3://${OUTPUT_BUCKET_NAME}/manual-test.txt - --profile core-account
 ```
 
 ---
 
-## Step 13: Check Lambda IAM Permissions
+## Step 13: Check Lambda IAM Permissions (AssumeRole Pattern)
 
-Verify Lambda has permissions to access Core S3:
+Verify Lambda has AssumeRole permission for Core S3AccessRole:
 
 ```bash
 # Get Lambda role
@@ -559,34 +557,93 @@ for policy in $(aws iam list-role-policies --role-name ${ROLE_NAME} --profile rp
     --profile rps-account \
     --query 'PolicyDocument' | jq '.'
 done
+
+# Check Lambda environment variables
+aws lambda get-function-configuration \
+  --function-name ${LAMBDA_NAME} \
+  --region ${REGION} \
+  --profile rps-account \
+  --query 'Environment.Variables.CORE_S3_ACCESS_ROLE_ARN'
 ```
 
-**Expected permissions:**
-- S3: GetObject, ListBucket on `input/*`
-- S3: PutObject on `output/*`
-- KMS: Decrypt, DescribeKey
-- SQS: ReceiveMessage, DeleteMessage, etc.
+**Expected permissions in RPS Lambda role:**
+- Cross-account: `sts:AssumeRole` for `arn:aws:iam::${CORE_ACCOUNT_ID}:role/${STAGE}-s3-access-role`
+- Same-account: SQS, CloudWatch Logs permissions
+- **NO direct S3 or KMS permissions** (all in Core S3AccessRole)
+
+**Expected environment variable:**
+- `CORE_S3_ACCESS_ROLE_ARN`: ARN of Core S3AccessRole
 
 ---
 
-## Step 14: Check Core S3 Bucket Policy
+## Step 14: Check Core S3AccessRole (AssumeRole Pattern)
 
-Verify Core bucket allows RPS Lambda to access it:
+Verify Core S3AccessRole exists and has correct permissions:
 
 ```bash
-# Get bucket policy
+# Check S3AccessRole exists
+aws iam get-role \
+  --role-name ${STAGE}-s3-access-role \
+  --profile core-account \
+  --query 'Role.{RoleName:RoleName,AssumeRolePolicyDocument:AssumeRolePolicyDocument}' | jq '.'
+
+# List S3AccessRole policies
+aws iam list-role-policies \
+  --role-name ${STAGE}-s3-access-role \
+  --profile core-account
+
+# Get inline policy documents
+for policy in $(aws iam list-role-policies --role-name ${STAGE}-s3-access-role --profile core-account --query 'PolicyNames' --output text); do
+  echo "=== Policy: $policy ==="
+  aws iam get-role-policy \
+    --role-name ${STAGE}-s3-access-role \
+    --policy-name $policy \
+    --profile core-account \
+    --query 'PolicyDocument' | jq '.'
+done
+```
+
+**Expected S3AccessRole trust policy:**
+- Principal: `arn:aws:iam::${RPS_ACCOUNT_ID}:root`
+- Condition: StringLike on `aws:PrincipalArn` matching `${STAGE}-processor-lambda-role` pattern
+
+**Expected S3AccessRole permissions:**
+- S3: GetObject, ListBucket on entire input bucket
+- S3: PutObject on entire output bucket
+- KMS: Decrypt, Encrypt, GenerateDataKey
+
+**Common issues:**
+- Trust policy doesn't allow RPS Lambda role: Check StringLike condition
+- Missing S3/KMS permissions: Check inline policies
+
+---
+
+## Step 15: Check Core S3 Bucket Policy (Defense in Depth)
+
+Verify Core bucket policy (should only deny public access):
+
+```bash
+# Get input bucket policy
 aws s3api get-bucket-policy \
-  --bucket ${BUCKET_NAME} \
+  --bucket ${INPUT_BUCKET_NAME} \
+  --profile core-account \
+  --query 'Policy' \
+  --output text | jq '.'
+
+# Get output bucket policy
+aws s3api get-bucket-policy \
+  --bucket ${OUTPUT_BUCKET_NAME} \
   --profile core-account \
   --query 'Policy' \
   --output text | jq '.'
 ```
 
-**Expected statements:**
-1. Allow RPS Lambda role to GetObject from `input/*`
-2. Allow RPS Lambda role to PutObject to `output/*`
+**Expected statement (both buckets):**
+- Effect: Deny
+- Principal: *
+- Condition: Denies public access (outside Core account)
 
-**Lambda Role ARN should be:** `arn:aws:iam::222222222222:role/dev-processor-lambda-role`
+**Note:** With AssumeRole pattern, bucket policies do NOT allow cross-account access. All S3 permissions are in S3AccessRole.
 
 ---
 
@@ -635,7 +692,7 @@ aws events put-targets \
 
 # Upload test file and check logs
 aws s3 cp test-data/sample-input.txt \
-  s3://${BUCKET_NAME}/input/test-debug.txt \
+  s3://${INPUT_BUCKET_NAME}/test-debug.txt \
   --profile core-account
 
 sleep 30
@@ -747,10 +804,18 @@ aws lambda list-event-source-mappings \
   --profile rps-account
 ```
 
-### Issue 5: Lambda permission errors
+### Issue 5: Lambda permission errors (AssumeRole Pattern)
 - Check Lambda logs for "AccessDenied" errors
-- Verify bucket policy in Core Account
-- Verify Lambda role policies in RPS Account
+- Verify Lambda role has `sts:AssumeRole` permission for Core S3AccessRole
+- Verify Core S3AccessRole trust policy allows Lambda role (StringLike condition)
+- Verify S3AccessRole has S3 and KMS permissions in Core Account
+- Check Lambda has `CORE_S3_ACCESS_ROLE_ARN` environment variable
+- Look for "Assuming role" or "Using cached credentials" in Lambda logs
+
+**Common errors:**
+- `AccessDenied` on AssumeRole: Trust policy doesn't allow Lambda role
+- `AccessDenied` on S3: S3AccessRole lacks S3 permissions
+- `KMS.NotFoundException`: S3AccessRole lacks KMS permissions
 
 ---
 
@@ -760,7 +825,7 @@ Run all checks at once:
 
 ```bash
 echo "=== 1. S3 EventBridge Config ==="
-aws s3api get-bucket-notification-configuration --bucket ${BUCKET_NAME} --profile core-account | jq '.'
+aws s3api get-bucket-notification-configuration --bucket ${INPUT_BUCKET_NAME} --profile core-account | jq '.'
 
 echo -e "\n=== 2. Core EventBridge Rule ==="
 aws events describe-rule --name ${STAGE}-s3-input-events --region ${REGION} --profile core-account

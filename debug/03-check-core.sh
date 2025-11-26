@@ -20,25 +20,36 @@ echo ""
 FAILED=0
 
 # ============================================
-# CHECK 1: S3 Bucket EventBridge Configuration
+# CHECK 1: Input Bucket EventBridge Configuration
 # ============================================
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo "CHECK 1: S3 Bucket EventBridge Enabled"
+echo "CHECK 1: Input Bucket EventBridge Enabled"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo "Bucket: $BUCKET_NAME"
+echo "Input Bucket: $INPUT_BUCKET_NAME"
 echo ""
 
-EB_CONFIG=$(aws_core s3api get-bucket-notification-configuration \
-  --bucket "$BUCKET_NAME" 2>/dev/null | jq -r '.EventBridgeConfiguration // empty')
+INPUT_EB_CONFIG=$(aws_core s3api get-bucket-notification-configuration \
+  --bucket "$INPUT_BUCKET_NAME" 2>/dev/null | jq -r '.EventBridgeConfiguration // empty')
 
-if [ -n "$EB_CONFIG" ]; then
-  echo "✅ PASS: EventBridge notifications enabled"
+if [ -n "$INPUT_EB_CONFIG" ]; then
+  echo "✅ PASS: Input bucket has EventBridge notifications enabled"
 else
-  echo "❌ FAIL: EventBridge notifications NOT enabled"
+  echo "❌ FAIL: Input bucket EventBridge notifications NOT enabled"
   echo ""
   echo "SOLUTION: Redeploy Core Stack"
   echo "  cdk deploy ${STAGE}-StackCore --profile ${CORE_PROFILE:-core-account}"
   FAILED=1
+fi
+
+echo ""
+echo "Output Bucket: $OUTPUT_BUCKET_NAME"
+OUTPUT_EB_CONFIG=$(aws_core s3api get-bucket-notification-configuration \
+  --bucket "$OUTPUT_BUCKET_NAME" 2>/dev/null | jq -r '.EventBridgeConfiguration // empty')
+
+if [ -z "$OUTPUT_EB_CONFIG" ]; then
+  echo "✅ PASS: Output bucket has NO EventBridge notifications (correct)"
+else
+  echo "⚠️  WARNING: Output bucket has EventBridge enabled (not needed)"
 fi
 echo ""
 
@@ -77,21 +88,20 @@ EVENT_PATTERN=$(aws_core events describe-rule \
   --name "$CORE_EVENTBRIDGE_RULE" \
   --region "$REGION" 2>/dev/null | jq -r '.EventPattern // empty')
 
-# Check if pattern matches S3 Object Created events with configured input prefix
+# Check if pattern matches S3 Object Created events for input bucket
 SOURCE=$(echo "$EVENT_PATTERN" | jq -r '.source[0] // empty')
 DETAIL_TYPE=$(echo "$EVENT_PATTERN" | jq -r '."detail-type"[0] // empty')
 BUCKET_CHECK=$(echo "$EVENT_PATTERN" | jq -r '.detail.bucket.name[0] // empty')
-PREFIX_CHECK=$(echo "$EVENT_PATTERN" | jq -r '.detail.object.key[0].prefix // empty')
 
 if [ "$SOURCE" = "aws.s3" ] && [ "$DETAIL_TYPE" = "Object Created" ] && \
-   [ "$BUCKET_CHECK" = "$BUCKET_NAME" ] && [ "$PREFIX_CHECK" = "$INPUT_PREFIX" ]; then
-  echo "✅ PASS: Event pattern correctly filters S3 Object Created in $BUCKET_NAME/${INPUT_PREFIX}"
+   [ "$BUCKET_CHECK" = "$INPUT_BUCKET_NAME" ]; then
+  echo "✅ PASS: Event pattern correctly filters S3 Object Created in input bucket"
+  echo "  Bucket: $INPUT_BUCKET_NAME"
 else
   echo "❌ FAIL: Event pattern incorrect"
   echo "  Source: $SOURCE (expected: aws.s3)"
   echo "  DetailType: $DETAIL_TYPE (expected: Object Created)"
-  echo "  Bucket: $BUCKET_CHECK (expected: $BUCKET_NAME)"
-  echo "  Prefix: $PREFIX_CHECK (expected: $INPUT_PREFIX)"
+  echo "  Bucket: $BUCKET_CHECK (expected: $INPUT_BUCKET_NAME)"
   echo ""
   echo "SOLUTION: Redeploy Core Stack"
   echo "  cdk deploy ${STAGE}-StackCore --profile ${CORE_PROFILE:-core-account}"
@@ -131,125 +141,81 @@ fi
 echo ""
 
 # ============================================
-# CHECK 5: S3 Bucket Policy - Lambda Read
+# CHECK 5: S3AccessRole (AssumeRole Pattern)
 # ============================================
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo "CHECK 5: S3 Bucket Policy - Lambda Read Access"
+echo "CHECK 5: S3AccessRole Exists and Has Correct Trust Policy"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "Role: ${STAGE}-s3-access-role"
+echo ""
 
-BUCKET_POLICY=$(aws_core s3api get-bucket-policy \
-  --bucket "$BUCKET_NAME" \
+S3_ACCESS_ROLE_ARN=$(aws_core iam get-role \
+  --role-name "${STAGE}-s3-access-role" \
+  --query 'Role.Arn' \
+  --output text 2>/dev/null)
+
+if [ -n "$S3_ACCESS_ROLE_ARN" ] && [ "$S3_ACCESS_ROLE_ARN" != "None" ]; then
+  echo "✅ PASS: S3AccessRole exists"
+  echo "  ARN: $S3_ACCESS_ROLE_ARN"
+
+  # Check trust policy allows RPS Lambda roles
+  TRUST_POLICY=$(aws_core iam get-role \
+    --role-name "${STAGE}-s3-access-role" \
+    --query 'Role.AssumeRolePolicyDocument' 2>/dev/null)
+
+  TRUST_PRINCIPAL=$(echo "$TRUST_POLICY" | jq -r '.Statement[0].Principal.AWS // empty')
+  TRUST_CONDITION=$(echo "$TRUST_POLICY" | jq -r '.Statement[0].Condition.StringLike["aws:PrincipalArn"] // empty')
+
+  if [[ "$TRUST_PRINCIPAL" == *":root" ]] && [[ "$TRUST_CONDITION" == *"processor-lambda-role"* ]]; then
+    echo "✅ PASS: Trust policy allows RPS Lambda roles with StringLike condition"
+  else
+    echo "❌ FAIL: Trust policy incorrect"
+    echo "  Principal: $TRUST_PRINCIPAL"
+    echo "  Condition: $TRUST_CONDITION"
+    FAILED=1
+  fi
+else
+  echo "❌ FAIL: S3AccessRole does not exist"
+  echo ""
+  echo "SOLUTION: Redeploy Core Stack"
+  echo "  cdk deploy ${STAGE}-StackCore --profile ${CORE_PROFILE:-core-account}"
+  FAILED=1
+fi
+echo ""
+
+# ============================================
+# CHECK 6: Bucket Policies (Defense in Depth Only)
+# ============================================
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "CHECK 6: Bucket Policies (Defense in Depth)"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "Note: With AssumeRole pattern, bucket policies should only deny public access"
+echo ""
+
+INPUT_BUCKET_POLICY=$(aws_core s3api get-bucket-policy \
+  --bucket "$INPUT_BUCKET_NAME" \
   --query 'Policy' \
   --output text 2>/dev/null)
 
-READ_STATEMENT=$(echo "$BUCKET_POLICY" | jq -r '.Statement[] | select(.Sid == "AllowAccountRpsLambdaRead") // empty')
+DENY_STATEMENT=$(echo "$INPUT_BUCKET_POLICY" | jq -r '.Statement[] | select(.Sid == "DenyPublicAccess") // empty')
 
-if [ -n "$READ_STATEMENT" ]; then
-  # Verify it allows GetObject and ListBucket
-  ACTIONS=$(echo "$READ_STATEMENT" | jq -r '.Action | if type == "array" then .[] else . end' | sort | tr '\n' ' ')
-  EXPECTED_ROLE="arn:aws:iam::${RPS_ACCOUNT_ID}:role/${STAGE}-processor-lambda-role"
-  ACTUAL_PRINCIPAL=$(echo "$READ_STATEMENT" | jq -r '.Principal.AWS // empty')
-
-  if echo "$ACTIONS" | grep -q "s3:GetObject" && echo "$ACTIONS" | grep -q "s3:ListBucket" && \
-     [ "$ACTUAL_PRINCIPAL" = "$EXPECTED_ROLE" ]; then
-    echo "✅ PASS: RPS Lambda can read from ${INPUT_PREFIX}*"
-    echo "  Principal: $ACTUAL_PRINCIPAL"
-  else
-    echo "❌ FAIL: Read statement exists but incorrect"
-    echo "  Actions: $ACTIONS"
-    echo "  Principal: $ACTUAL_PRINCIPAL"
-    echo "  Expected: $EXPECTED_ROLE"
-    FAILED=1
-  fi
+if [ -n "$DENY_STATEMENT" ]; then
+  echo "✅ PASS: Input bucket has DenyPublicAccess policy (correct)"
 else
-  echo "❌ FAIL: Missing 'AllowAccountRpsLambdaRead' statement"
-  echo ""
-  echo "SOLUTION: Redeploy Core Stack"
-  echo "  cdk deploy ${STAGE}-StackCore --profile ${CORE_PROFILE:-core-account}"
-  FAILED=1
+  echo "⚠️  WARNING: Input bucket missing DenyPublicAccess statement"
 fi
-echo ""
 
-# ============================================
-# CHECK 6: S3 Bucket Policy - Lambda Write
-# ============================================
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo "CHECK 6: S3 Bucket Policy - Lambda Write Access"
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-
-WRITE_STATEMENT=$(echo "$BUCKET_POLICY" | jq -r '.Statement[] | select(.Sid == "AllowAccountRpsLambdaWrite") // empty')
-
-if [ -n "$WRITE_STATEMENT" ]; then
-  ACTIONS=$(echo "$WRITE_STATEMENT" | jq -r '.Action | if type == "array" then .[] else . end' | sort | tr '\n' ' ')
-  EXPECTED_ROLE="arn:aws:iam::${RPS_ACCOUNT_ID}:role/${STAGE}-processor-lambda-role"
-  ACTUAL_PRINCIPAL=$(echo "$WRITE_STATEMENT" | jq -r '.Principal.AWS // empty')
-
-  if echo "$ACTIONS" | grep -q "s3:PutObject" && [ "$ACTUAL_PRINCIPAL" = "$EXPECTED_ROLE" ]; then
-    echo "✅ PASS: RPS Lambda can write to ${OUTPUT_PREFIX}*"
-    echo "  Principal: $ACTUAL_PRINCIPAL"
-  else
-    echo "❌ FAIL: Write statement exists but incorrect"
-    echo "  Actions: $ACTIONS"
-    echo "  Principal: $ACTUAL_PRINCIPAL"
-    echo "  Expected: $EXPECTED_ROLE"
-    FAILED=1
-  fi
-else
-  echo "❌ FAIL: Missing 'AllowAccountRpsLambdaWrite' statement"
-  echo ""
-  echo "SOLUTION: Redeploy Core Stack"
-  echo "  cdk deploy ${STAGE}-StackCore --profile ${CORE_PROFILE:-core-account}"
-  FAILED=1
-fi
-echo ""
-
-# ============================================
-# CHECK 7: KMS Key Policy
-# ============================================
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo "CHECK 7: KMS Key Policy - Cross-Account Access"
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-
-KEY_ID=$(aws_core s3api get-bucket-encryption \
-  --bucket "$BUCKET_NAME" \
-  --query 'ServerSideEncryptionConfiguration.Rules[0].ApplyServerSideEncryptionByDefault.KMSMasterKeyID' \
+OUTPUT_BUCKET_POLICY=$(aws_core s3api get-bucket-policy \
+  --bucket "$OUTPUT_BUCKET_NAME" \
+  --query 'Policy' \
   --output text 2>/dev/null)
 
-if [ "$KEY_ID" != "None" ] && [ -n "$KEY_ID" ]; then
-  echo "KMS Key: $KEY_ID"
+DENY_STATEMENT_OUT=$(echo "$OUTPUT_BUCKET_POLICY" | jq -r '.Statement[] | select(.Sid == "DenyPublicAccess") // empty')
 
-  KMS_POLICY=$(aws_core kms get-key-policy \
-    --key-id "$KEY_ID" \
-    --policy-name default \
-    --query 'Policy' \
-    --output text 2>/dev/null)
-
-  KMS_STATEMENT=$(echo "$KMS_POLICY" | jq -r '.Statement[] | select(.Sid == "AllowAccountRpsLambdaDecrypt") // empty')
-
-  if [ -n "$KMS_STATEMENT" ]; then
-    PRINCIPAL=$(echo "$KMS_STATEMENT" | jq -r '.Principal.AWS // empty')
-    CONDITION=$(echo "$KMS_STATEMENT" | jq -r '.Condition.StringEquals["kms:ViaService"] // empty')
-    EXPECTED_PRINCIPAL="arn:aws:iam::${RPS_ACCOUNT_ID}:role/${STAGE}-processor-lambda-role"
-
-    if [ "$PRINCIPAL" = "$EXPECTED_PRINCIPAL" ] && [ "$CONDITION" = "s3.${REGION}.amazonaws.com" ]; then
-      echo "✅ PASS: RPS Lambda role can decrypt via S3 service"
-      echo "  Principal: $PRINCIPAL"
-    else
-      echo "❌ FAIL: KMS policy incorrect"
-      echo "  Expected Principal: $EXPECTED_PRINCIPAL"
-      echo "  Actual Principal:   $PRINCIPAL"
-      echo "  Condition: $CONDITION (expected: s3.${REGION}.amazonaws.com)"
-      FAILED=1
-    fi
-  else
-    echo "❌ FAIL: Missing 'AllowAccountRpsLambdaDecrypt' statement"
-    echo ""
-    echo "SOLUTION: Redeploy Core Stack"
-    echo "  cdk deploy ${STAGE}-StackCore --profile ${CORE_PROFILE:-core-account}"
-    FAILED=1
-  fi
+if [ -n "$DENY_STATEMENT_OUT" ]; then
+  echo "✅ PASS: Output bucket has DenyPublicAccess policy (correct)"
 else
-  echo "⚠️  SKIP: No KMS encryption (using S3 default encryption)"
+  echo "⚠️  WARNING: Output bucket missing DenyPublicAccess statement"
 fi
 echo ""
 

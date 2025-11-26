@@ -13,49 +13,38 @@ Aspects.of(app).add(new AwsSolutionsChecks({ verbose: true }));
 //   cdk deploy dev-StackCore --profile core-account
 //   cdk deploy dev-StackRps --profile rps-account
 //
-// Multi-developer deployment examples:
-//   Regular dev stack (no deployment prefix):
-//     STAGE=dev cdk deploy dev-StackRps --profile rps-account
-//     Processes: input/ → output/
-//
-//   John's personal stack (with deployment prefix):
-//     STAGE=dev CDK_DEPLOYMENT_PREFIX=john cdk deploy dev-john-StackRps --profile rps-account
-//     Processes: input/john/ → output/john/
+// Architecture:
+//   - Core account has separate input and output S3 buckets
+//   - Lambda reads from input bucket, writes to output bucket
+//   - Files keep the same key (no prefix transformations)
 const prefix = process.env.STAGE || 'dev';
 const region = process.env.REGION || 'eu-west-1';
 
 const accountCoreId = process.env.ACCOUNT_CORE_ID || '111111111111';
 const accountRpsId = process.env.ACCOUNT_RPS_ID || '222222222222';
 
-// S3 prefixes for input and output files (configurable)
-const inputPrefix = process.env.INPUT_PREFIX || 'input/';
-const outputPrefix = process.env.OUTPUT_PREFIX || 'output/';
-
 // Optional: Deployment prefix for multi-developer isolation
-// If set, creates subdirectory under input/output for this deployment
-// Example: CDK_DEPLOYMENT_PREFIX=john → processes input/john/ → output/john/
 const developerPrefix = process.env.CDK_DEPLOYMENT_PREFIX;
 
 // Optional: Existing event bus name for shared dev environments (multi-developer)
 // If provided, multiple developers can share a single event bus instead of creating individual ones
 const existingEventBusName = process.env.EXISTING_EVENT_BUS_NAME;
 
-// Deploy RPS Stack (target account with Lambda processor)
-// Note: Bucket name is predictable, so we construct it instead of cross-account reference
-const stackCoreBucketName = `${prefix}-core-test-bucket-${accountCoreId}-${region}`;
+// Construct bucket names (predictable naming, no cross-account references needed)
+const stackCoreInputBucketName = `${prefix}-core-input-bucket-${accountCoreId}-${region}`;
+const stackCoreOutputBucketName = `${prefix}-core-output-bucket-${accountCoreId}-${region}`;
 
-// Deploy Core Stack (source account with S3 bucket)
+// Deploy Core Stack (source account with S3 buckets)
 const stackCore = new StackCore(app, `${prefix}-StackCore`, {
   prefix,
   accountRpsId,
   region,
-  inputPrefix,
   env: {
     account: accountCoreId,
     region,
   },
   stackName: `${prefix}-core-stack`,
-  description: `Core Stack for ${prefix}: S3 bucket with EventBridge notifications`,
+  description: `Core Stack for ${prefix}: Input/output S3 buckets with EventBridge notifications`,
 });
 
 // Construct stack ID and name based on deployment prefix
@@ -68,10 +57,9 @@ const stackRps = new StackRps(app, rpsStackId, {
   prefix,
   deploymentPrefix: developerPrefix,
   accountCoreId,
-  stackCoreBucketName,
+  stackCoreInputBucketName,
+  stackCoreOutputBucketName,
   region,
-  inputPrefix,
-  outputPrefix,
   existingEventBusName,
   env: {
     account: accountRpsId,

@@ -118,37 +118,20 @@ ACCOUNT=$(echo "$EVENT_PATTERN" | jq -r '.account[0] // empty')
 SOURCE=$(echo "$EVENT_PATTERN" | jq -r '.source[0] // empty')
 DETAIL_TYPE=$(echo "$EVENT_PATTERN" | jq -r '."detail-type"[0] // empty')
 BUCKET_CHECK=$(echo "$EVENT_PATTERN" | jq -r '.detail.bucket.name[0] // empty')
-PREFIX_CHECK=$(echo "$EVENT_PATTERN" | jq -r '.detail.object.key[0].prefix // empty')
-
-# Expected prefix depends on CDK_DEPLOYMENT_PREFIX:
-# - With CDK_DEPLOYMENT_PREFIX: input/{developer}/ (e.g., "input/john/")
-# - Without CDK_DEPLOYMENT_PREFIX: input/ (processes all, Lambda filters subdirectories)
-if [ -n "$CDK_DEPLOYMENT_PREFIX" ]; then
-  EXPECTED_PREFIX="${INPUT_PREFIX}${CDK_DEPLOYMENT_PREFIX}/"
-else
-  EXPECTED_PREFIX="${INPUT_PREFIX}"
-fi
 
 if [ "$ACCOUNT" = "$CORE_ACCOUNT_ID" ] && [ "$SOURCE" = "aws.s3" ] && \
-   [ "$DETAIL_TYPE" = "Object Created" ] && [ "$BUCKET_CHECK" = "$BUCKET_NAME" ] && \
-   [ "$PREFIX_CHECK" = "$EXPECTED_PREFIX" ]; then
-  if [ -n "$CDK_DEPLOYMENT_PREFIX" ]; then
-    echo "✅ PASS: Event pattern filters for developer-specific prefix ${EXPECTED_PREFIX}"
-  else
-    echo "✅ PASS: Event pattern filters for all ${EXPECTED_PREFIX} events (Lambda skips subdirectories)"
-  fi
+   [ "$DETAIL_TYPE" = "Object Created" ] && [ "$BUCKET_CHECK" = "$INPUT_BUCKET_NAME" ]; then
+  echo "✅ PASS: Event pattern filters for input bucket events"
   echo "  Account: $ACCOUNT"
   echo "  Source: $SOURCE"
   echo "  DetailType: $DETAIL_TYPE"
   echo "  Bucket: $BUCKET_CHECK"
-  echo "  Prefix: $PREFIX_CHECK"
 else
   echo "❌ FAIL: Event pattern incorrect"
   echo "  Account: $ACCOUNT (expected: $CORE_ACCOUNT_ID)"
   echo "  Source: $SOURCE (expected: aws.s3)"
   echo "  DetailType: $DETAIL_TYPE (expected: Object Created)"
-  echo "  Bucket: $BUCKET_CHECK (expected: $BUCKET_NAME)"
-  echo "  Prefix: $PREFIX_CHECK (expected: $EXPECTED_PREFIX)"
+  echo "  Bucket: $BUCKET_CHECK (expected: $INPUT_BUCKET_NAME)"
   FAILED=1
 fi
 echo ""
@@ -344,12 +327,12 @@ for policy in $ALL_POLICIES; do
   if [ "$READ_SID" = "ReadFromStackCoreBucket" ]; then
     S3_READ_FOUND=true
 
-    # Verify bucket name in resources (handle both string and array)
-    RESOURCE_CHECK=$(echo "$POLICY_DOC" | jq -r ".Statement[] | select(.Sid == \"ReadFromStackCoreBucket\") | .Resource | if type == \"array\" then .[] else . end | select(contains(\"$BUCKET_NAME\"))")
+    # Verify input bucket name in resources (handle both string and array)
+    RESOURCE_CHECK=$(echo "$POLICY_DOC" | jq -r ".Statement[] | select(.Sid == \"ReadFromStackCoreBucket\") | .Resource | if type == \"array\" then .[] else . end | select(contains(\"$INPUT_BUCKET_NAME\"))")
 
     if [ -n "$RESOURCE_CHECK" ]; then
-      echo "✅ PASS: Lambda can read from Core bucket"
-      echo "  Bucket: $BUCKET_NAME"
+      echo "✅ PASS: Lambda can read from Core input bucket"
+      echo "  Bucket: $INPUT_BUCKET_NAME"
     else
       echo "❌ FAIL: S3 read policy exists but wrong bucket"
       FAILED=1
@@ -359,7 +342,7 @@ for policy in $ALL_POLICIES; do
 done
 
 if [ "$S3_READ_FOUND" = false ]; then
-  echo "❌ FAIL: Missing S3 read permissions for Core bucket"
+  echo "❌ FAIL: Missing S3 read permissions for Core input bucket"
   echo ""
   echo "SOLUTION: Redeploy RPS Stack"
   echo "  cdk deploy ${STAGE}-StackRps --profile ${RPS_PROFILE:-rps-account}"
@@ -385,12 +368,12 @@ for policy in $ALL_POLICIES; do
   if [ "$WRITE_SID" = "WriteToStackCoreBucket" ]; then
     S3_WRITE_FOUND=true
 
-    # Verify bucket name in resources (handle both string and array)
-    RESOURCE_CHECK=$(echo "$POLICY_DOC" | jq -r ".Statement[] | select(.Sid == \"WriteToStackCoreBucket\") | .Resource | if type == \"array\" then .[] else . end | select(contains(\"$BUCKET_NAME\"))")
+    # Verify output bucket name in resources (handle both string and array)
+    RESOURCE_CHECK=$(echo "$POLICY_DOC" | jq -r ".Statement[] | select(.Sid == \"WriteToStackCoreBucket\") | .Resource | if type == \"array\" then .[] else . end | select(contains(\"$OUTPUT_BUCKET_NAME\"))")
 
     if [ -n "$RESOURCE_CHECK" ]; then
-      echo "✅ PASS: Lambda can write to Core bucket"
-      echo "  Bucket: $BUCKET_NAME"
+      echo "✅ PASS: Lambda can write to Core output bucket"
+      echo "  Bucket: $OUTPUT_BUCKET_NAME"
     else
       echo "❌ FAIL: S3 write policy exists but wrong bucket"
       FAILED=1
@@ -400,7 +383,7 @@ for policy in $ALL_POLICIES; do
 done
 
 if [ "$S3_WRITE_FOUND" = false ]; then
-  echo "❌ FAIL: Missing S3 write permissions for Core bucket"
+  echo "❌ FAIL: Missing S3 write permissions for Core output bucket"
   echo ""
   echo "SOLUTION: Redeploy RPS Stack"
   echo "  cdk deploy ${STAGE}-StackRps --profile ${RPS_PROFILE:-rps-account}"

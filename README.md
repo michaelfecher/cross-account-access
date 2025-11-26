@@ -10,30 +10,29 @@ This project implements a secure, scalable cross-account architecture with the f
 Core Account                                  RPS Account
 ┌─────────────────────────────────┐          ┌──────────────────────────────────┐
 │                                 │          │                                  │
-│  S3 Bucket                      │          │                                  │
-│  ├─ input/  (triggers events)   │          │                                  │
-│  └─ output/ (receives results)  │          │                                  │
+│  Input S3 Bucket                │          │                                  │
+│  (triggers events)              │          │                                  │
 │            │                    │          │                                  │
 │            │ ObjectCreated      │          │                                  │
 │            ▼                    │          │                                  │
 │  EventBridge Rule               │          │                                  │
-│  (filters input/ prefix)        │          │                                  │
+│  (filters input bucket)         │          │                                  │
 │            │                    │          │                                  │
 │            │ Cross-account      │          │                                  │
-│            └────────────────────┼─────────▶│  EventBridge (default bus)       │
+│            └────────────────────┼─────────▶│  EventBridge (custom bus)        │
 │                                 │          │            │                     │
-│                                 │          │            ▼                     │
-│                                 │          │  EventBridge Rule                │
-│                                 │          │  (filters Core Account events)   │
-│                                 │          │            │                     │
-│                                 │          │            ▼                     │
-│                                 │          │  SQS Queue (encrypted)           │
-│                                 │          │  └─ DLQ for failed messages      │
-│                                 │          │            │                     │
-│                                 │          │            ▼                     │
-│                                 │          │  Lambda Function                 │
-│                                 │          │  ├─ Read: s3://bucket/input/*    │
-│                                 │◀─────────┼──┴─ Write: s3://bucket/output/*  │
+│  Output S3 Bucket               │          │            ▼                     │
+│  (receives results)             │          │  EventBridge Rule                │
+│            ▲                    │          │  (filters Core Account events)   │
+│            │                    │          │            │                     │
+│  S3AccessRole (IAM)             │          │            ▼                     │
+│  ├─ S3: read input bucket       │          │  SQS Queue (encrypted)           │
+│  ├─ S3: write output bucket     │          │  └─ DLQ for failed messages      │
+│  └─ KMS: encrypt/decrypt        │          │            │                     │
+│            ▲                    │          │            ▼                     │
+│            │ AssumeRole         │          │  Lambda Function                 │
+│            │ (temp creds)       │          │  └─ AssumeRole Core S3AccessRole │
+│            └────────────────────┼──────────┼─────────────┘                    │
 │                                 │          │                                  │
 └─────────────────────────────────┘          └──────────────────────────────────┘
 ```
@@ -41,6 +40,11 @@ Core Account                                  RPS Account
 ## Features
 
 - **Multi-instance deployment**: Deploy multiple isolated instances with different prefixes (e.g., dev, staging, prod)
+- **AssumeRole pattern for cross-account access**:
+  - Centralized S3/KMS permissions in Core account
+  - Temporary credentials (1-hour validity)
+  - Credential caching for performance
+  - StringLike condition for restricted trust policy
 - **Security best practices**:
   - KMS encryption for S3 and SQS
   - Versioned S3 buckets with lifecycle policies
@@ -104,7 +108,8 @@ const deployments: DeploymentConfig[] = [
 
 Each instance is isolated with its own resources:
 - Stack A-{prefix} and Stack B-{prefix}
-- {prefix}-core-test-bucket-{account}-{region}
+- {prefix}-core-input-bucket-{account}-{region}
+- {prefix}-core-output-bucket-{account}-{region}
 - {prefix}-processor-queue
 - {prefix}-s3-processor Lambda function
 
@@ -151,21 +156,22 @@ cdk deploy prod-StackA prod-StackB
 
 ### End-to-End Test
 
-1. Upload a test file to the input prefix in Core Account's bucket:
+1. Upload a test file to the input bucket in Core Account:
 
 ```bash
-export BUCKET_NAME="dev-core-test-bucket-111111111111-eu-central-1"
+export INPUT_BUCKET_NAME="dev-core-input-bucket-111111111111-eu-central-1"
+export OUTPUT_BUCKET_NAME="dev-core-output-bucket-111111111111-eu-central-1"
 echo "Test content" > test.txt
-aws s3 cp test.txt s3://$BUCKET_NAME/input/test.txt --profile account-a
+aws s3 cp test.txt s3://$INPUT_BUCKET_NAME/test.txt --profile account-a
 ```
 
 2. Wait a few seconds for processing
 
-3. Check the output prefix for the processed file:
+3. Check the output bucket for the processed file:
 
 ```bash
-aws s3 ls s3://$BUCKET_NAME/output/ --profile account-a
-aws s3 cp s3://$BUCKET_NAME/output/test.txt - --profile account-a
+aws s3 ls s3://$OUTPUT_BUCKET_NAME/ --profile account-a
+aws s3 cp s3://$OUTPUT_BUCKET_NAME/test.txt - --profile account-a
 ```
 
 ### Integration Tests
@@ -209,33 +215,60 @@ The integration tests cover:
 
 ## Key Resources
 
-### Stack A Resources
+### Core Stack Resources
 
-- **S3 Bucket**: Encrypted with KMS, versioned, with access logging
-- **S3 Access Logs Bucket**: Stores access logs for the main bucket
-- **KMS Key**: For S3 bucket encryption with automatic rotation
-- **EventBridge Rule**: Captures ObjectCreated events on input/ prefix
-- **IAM Role**: Allows EventBridge to send events to RPS Account
-- **Bucket Policies**: Grant RPS Account Lambda read (input/*) and write (output/*) access
+- **Input S3 Bucket**: Encrypted with KMS, versioned, with access logging, EventBridge notifications enabled
+- **Output S3 Bucket**: Encrypted with KMS, versioned, with access logging
+- **S3 Access Logs Bucket**: Stores access logs for both buckets
+- **KMS Key**: Shared key for both S3 buckets with automatic rotation
+- **S3AccessRole**: IAM role with S3/KMS permissions that RPS Lambda assumes
+  - Trust policy: Allows RPS Lambda roles (using StringLike condition)
+  - Permissions: S3 read (entire input bucket), write (entire output bucket), KMS encrypt/decrypt
+- **EventBridge Rule**: Captures ObjectCreated events on input bucket
+- **EventBridge IAM Role**: Allows EventBridge to send events to RPS Account
+- **Bucket Policies**: Defense in depth - deny public access only
 
-### Stack B Resources
+### RPS Stack Resources
 
 - **SQS Queue**: Encrypted main processing queue
 - **Dead Letter Queue**: For failed message handling
 - **KMS Key**: For SQS encryption with automatic rotation
+- **Custom Event Bus**: Receives cross-account events (shared across deployments)
 - **EventBridge Rule**: Receives events from Core Account
-- **Lambda Function**: Node.js 20 processor with cross-account S3 access
-- **IAM Role**: Lambda execution role with least-privilege permissions
+- **Lambda Function**: Node.js 22 processor with AssumeRole cross-account access
+- **Lambda IAM Role**: Execution role with ONLY sts:AssumeRole permission (cross-account)
 - **Event Bus Policy**: Allows Core Account to send events
 
 ## Security Considerations
 
+### AssumeRole Pattern
+
+This project uses **STS AssumeRole** for cross-account S3 access instead of direct cross-account bucket policies:
+
+- **Core Account** hosts S3AccessRole with ALL S3/KMS permissions
+- **RPS Lambda** assumes this role to get temporary credentials (1-hour validity)
+- **Credentials are cached** in Lambda container and reused across invocations
+- **Trust policy** uses StringLike condition to restrict which roles can assume
+
+Benefits:
+- ✅ Centralized permission management
+- ✅ Temporary credentials (auto-expiring)
+- ✅ No complex cross-account bucket/KMS policies
+- ✅ Clear CloudTrail audit trail
+
 ### IAM Permissions
 
-- Lambda role in RPS Account has **read-only** access to `s3://{bucket}/input/*`
-- Lambda role in RPS Account has **write-only** access to `s3://{bucket}/output/*`
-- All permissions are scoped to specific resources using least-privilege principle
-- KMS keys grant cross-account decrypt permissions via service-specific conditions
+**Core S3AccessRole (in Core Account):**
+- S3 read access: entire input bucket
+- S3 write access: entire output bucket
+- KMS decrypt/encrypt for shared S3 bucket key
+
+**RPS Lambda Role (in RPS Account):**
+- Cross-account: ONLY `sts:AssumeRole` for Core S3AccessRole
+- Same-account: SQS, CloudWatch Logs permissions
+- NO direct S3 or KMS permissions
+
+All permissions follow least-privilege principle.
 
 ### Encryption
 
@@ -247,8 +280,9 @@ The integration tests cover:
 ### Access Controls
 
 - S3 buckets have "Block Public Access" enabled
-- Bucket policies require specific IAM role ARNs
-- Cross-account access is explicitly granted and scoped by prefix
+- S3AccessRole trust policy uses StringLike condition to restrict assumable roles
+- Cross-account access uses temporary credentials via AssumeRole
+- All S3/KMS permissions scoped to specific buckets (read input bucket, write output bucket)
 
 ## Common Operations
 
@@ -309,15 +343,25 @@ cdk destroy dev-StackA --profile account-a
 
 1. Check SQS queue for messages
 2. View Lambda CloudWatch Logs: `/aws/lambda/dev-s3-processor`
-3. Verify Lambda IAM role has S3 permissions
-4. Check KMS key policy allows Lambda role to decrypt
+3. Verify Lambda role has sts:AssumeRole permission for Core S3AccessRole
+4. Check S3AccessRole has S3 and KMS permissions in Core Account
 
 ### S3 Access Denied
 
-1. Verify bucket policy in Stack A allows RPS Account role
-2. Check KMS key policy allows cross-account access
-3. Ensure Lambda role ARN matches the one in bucket policy
-4. Verify you're accessing the correct prefixes (input/ vs output/)
+With the AssumeRole pattern, check these in order:
+
+1. **AssumeRole permission**: Verify Lambda role has `sts:AssumeRole` for Core S3AccessRole
+2. **Trust policy**: Verify Core S3AccessRole trust policy allows Lambda role (check StringLike condition)
+3. **S3 permissions**: Verify S3AccessRole has S3 read/write permissions in Core Stack
+4. **KMS permissions**: Verify S3AccessRole has KMS decrypt/encrypt permissions
+5. **Environment variables**: Check Lambda has `CORE_S3_ACCESS_ROLE_ARN`, `INPUT_BUCKET_NAME`, `OUTPUT_BUCKET_NAME` set correctly
+6. **CloudWatch Logs**: Look for "Assuming role" or "Using cached credentials" messages
+7. **Buckets**: Verify accessing correct buckets (input bucket for read, output bucket for write)
+
+Common errors:
+- `AccessDenied` on AssumeRole: Trust policy doesn't allow Lambda role
+- `AccessDenied` on S3: S3AccessRole lacks S3 permissions
+- `KMS.NotFoundException`: S3AccessRole lacks KMS permissions
 
 ## Development
 

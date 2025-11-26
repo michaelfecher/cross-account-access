@@ -73,8 +73,8 @@ describe('EventBridge Cross-Account Transfer', () => {
   });
 
   test('Should transfer S3 ObjectCreated event from Core Account to RPS Account', async () => {
-    const testBucketName = `${PREFIX}-core-test-bucket-${ACCOUNT_CORE_ID}-${REGION}`;
-    const testObjectKey = 'input/test-file.txt';
+    const testBucketName = `${PREFIX}-core-input-bucket-${ACCOUNT_CORE_ID}-${REGION}`;
+    const testObjectKey = 'test-file.txt';
     const testEventId = `test-${Date.now()}`;
 
     // Step 1: Send test event to Core Account's EventBridge

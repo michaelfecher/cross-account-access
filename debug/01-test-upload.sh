@@ -15,39 +15,30 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/00-config.sh"
 
 # Use provided filename or generate one
-# Path structure depends on CDK_DEPLOYMENT_PREFIX:
-# - With CDK_DEPLOYMENT_PREFIX: input/{developer}/file.txt → output/{developer}/file.txt
-# - Without CDK_DEPLOYMENT_PREFIX: input/file.txt → output/file.txt
+# Files uploaded to input bucket, processed files appear in output bucket with same key
 FILENAME="${1:-test-$(date +%s).txt}"
-
-if [ -n "$CDK_DEPLOYMENT_PREFIX" ]; then
-  INPUT_KEY="${INPUT_PREFIX}${CDK_DEPLOYMENT_PREFIX}/${FILENAME}"
-  OUTPUT_KEY="${OUTPUT_PREFIX}${CDK_DEPLOYMENT_PREFIX}/${FILENAME}"
-else
-  INPUT_KEY="${INPUT_PREFIX}${FILENAME}"
-  OUTPUT_KEY="${OUTPUT_PREFIX}${FILENAME}"
-fi
 
 echo "=========================================="
 echo "Test Upload and Flow Monitoring"
 echo "=========================================="
 echo ""
 echo "Test file: $FILENAME"
-echo "Input path: s3://$BUCKET_NAME/$INPUT_KEY"
-echo "Output path: s3://$BUCKET_NAME/$OUTPUT_KEY"
+echo "Input:  s3://$INPUT_BUCKET_NAME/$FILENAME"
+echo "Output: s3://$OUTPUT_BUCKET_NAME/$FILENAME"
 echo ""
 
 # Create test content
 TEST_CONTENT="Test upload at $(date -u +%Y-%m-%dT%H:%M:%SZ)
 This is a test file to verify cross-account event flow.
 File: $FILENAME
-Bucket: $BUCKET_NAME
+Input Bucket: $INPUT_BUCKET_NAME
+Output Bucket: $OUTPUT_BUCKET_NAME
 "
 
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo "Step 1: Upload test file to ${INPUT_PREFIX}"
+echo "Step 1: Upload test file to input bucket"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo "$TEST_CONTENT" | aws_core s3 cp - "s3://$BUCKET_NAME/$INPUT_KEY"
+echo "$TEST_CONTENT" | aws_core s3 cp - "s3://$INPUT_BUCKET_NAME/$FILENAME"
 echo "✓ File uploaded successfully"
 echo ""
 
@@ -64,12 +55,12 @@ echo "━━━━━━━━━━━━━━━━━━━━━━━━�
 echo "(This is the definitive test - if file exists, system works!)"
 echo ""
 
-if aws_core s3 ls "s3://$BUCKET_NAME/$OUTPUT_KEY" >/dev/null 2>&1; then
+if aws_core s3 ls "s3://$OUTPUT_BUCKET_NAME/$FILENAME" >/dev/null 2>&1; then
   echo "✓ Output file EXISTS!"
   echo ""
   echo "Output file content:"
   echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-  aws_core s3 cp "s3://$BUCKET_NAME/$OUTPUT_KEY" -
+  aws_core s3 cp "s3://$OUTPUT_BUCKET_NAME/$FILENAME" -
   echo ""
   echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
   echo ""
@@ -90,37 +81,12 @@ else
   if echo "$LAMBDA_LOGS" | grep -qi "Access.*Denied\|Forbidden"; then
     echo "⚠️  DETECTED: S3 Access Denied Error"
     echo ""
-    echo "Checking Core stack bucket policy..."
+    echo "With AssumeRole pattern, check:"
+    echo "  1. Lambda role has sts:AssumeRole permission for Core S3AccessRole"
+    echo "  2. Core S3AccessRole trust policy allows Lambda role"
+    echo "  3. Core S3AccessRole has S3 read/write permissions"
     echo ""
-
-    BUCKET_POLICY=$(aws_core s3api get-bucket-policy \
-      --bucket "$BUCKET_NAME" \
-      --query 'Policy' \
-      --output text 2>/dev/null)
-
-    # Check read policy principal
-    READ_PRINCIPAL=$(echo "$BUCKET_POLICY" | jq -r '.Statement[] | select(.Sid == "AllowAccountRpsLambdaRead") | .Principal.AWS // empty')
-
-    if [ -z "$READ_PRINCIPAL" ]; then
-      echo "❌ PROBLEM: Bucket policy missing AllowAccountRpsLambdaRead statement"
-      echo ""
-      echo "SOLUTION: Redeploy Core stack"
-      echo "  cdk deploy ${STAGE}-StackCore --profile ${CORE_PROFILE:-core-account}"
-    elif echo "$READ_PRINCIPAL" | grep -q ":role/"; then
-      echo "❌ PROBLEM: Bucket policy grants access to specific role only"
-      echo "  Current: $READ_PRINCIPAL"
-      echo "  Expected (for dev): arn:aws:iam::${RPS_ACCOUNT_ID}:root"
-      echo ""
-      echo "SOLUTION: Redeploy Core stack to use AccountPrincipal"
-      echo "  cdk deploy ${STAGE}-StackCore --profile ${CORE_PROFILE:-core-account}"
-    elif echo "$READ_PRINCIPAL" | grep -q ":root"; then
-      echo "✓ Bucket policy looks correct (AccountPrincipal)"
-      echo "  Principal: $READ_PRINCIPAL"
-      echo ""
-      echo "Check Lambda role permissions in RPS stack..."
-    else
-      echo "⚠️  Unexpected principal format: $READ_PRINCIPAL"
-    fi
+    echo "Run: bash debug/05-check-policies.sh"
     echo ""
   fi
 

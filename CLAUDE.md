@@ -8,9 +8,10 @@ This is a **Projen-managed AWS CDK TypeScript** project implementing secure cros
 
 ### Architecture Pattern
 
-- **Core Account**: Hosts an S3 bucket that emits EventBridge notifications when files are uploaded to `input/` prefix
-- **RPS Account**: Receives events via EventBridge, queues them in SQS, and processes via Lambda that reads from Core Account's S3 `input/` and writes to `output/`
+- **Core Account**: Hosts separate input and output S3 buckets. Input bucket emits EventBridge notifications. Contains S3AccessRole that RPS Lambda assumes to access S3/KMS resources.
+- **RPS Account**: Receives events via EventBridge, queues them in SQS, and processes via Lambda that assumes Core S3AccessRole to read from input bucket and write to output bucket
 - **Multi-instance**: Supports deploying multiple isolated environments with different prefixes (e.g., dev, staging, prod)
+- **AssumeRole Pattern**: Cross-account S3 access uses STS AssumeRole for temporary credentials, centralizing all S3/KMS permissions in Core account
 
 ### Key Design Principles
 
@@ -58,28 +59,35 @@ npx projen             # Regenerate project files from .projenrc.ts
 **src/stack-core.ts** - `StackCore` class
 - Creates S3 bucket with KMS encryption, versioning, access logging
 - Creates access logs bucket (separate, S3-managed encryption)
-- Creates KMS key for bucket with cross-account permissions for RPS Account
+- Creates KMS key for bucket (same-account access only)
+- Creates S3AccessRole with trust policy allowing RPS Lambda roles to assume (using StringLike condition in dev)
+- Grants S3 read (`input/*`) and write (`output/*`) permissions to S3AccessRole
+- Grants KMS decrypt/encrypt permissions to S3AccessRole
 - Creates EventBridge rule matching `aws.s3` events with `Object Created` detail-type and `input/` prefix filter
 - Grants RPS Account EventBridge permission to send events
-- Exports: `bucket`, `bucketName`
+- Exports: `bucket`, `bucketName`, `s3AccessRole`, `s3AccessRoleArn`
 
 **src/stack-rps.ts** - `StackRps` class
 - Creates SQS queue with KMS encryption and DLQ
 - Creates Lambda function with NodejsFunction construct (auto-bundles dependencies)
-- Creates IAM role with specific name `{prefix}-processor-lambda-role` for cross-account trust
+- Creates IAM role with specific name `{prefix}-processor-lambda-role` for Core S3AccessRole trust policy
+- Grants Lambda role ONLY `sts:AssumeRole` permission for Core S3AccessRole (all S3/KMS permissions centralized in Core)
 - Creates EventBridge rule to receive events from Core Account (filters by account ID)
 - Routes EventBridge events to SQS
 - Lambda triggered by SQS via event source mapping
+- Passes Core S3AccessRole ARN to Lambda via `CORE_S3_ACCESS_ROLE_ARN` environment variable
 - Exports: `processorQueue`, `processorLambda`
 
 ### Lambda Handler (lambda/)
 
 **lambda/processor.ts**
 - Handler signature: `async (event: SQSEvent): Promise<SQSBatchResponse>`
+- Uses STS AssumeRole to get temporary credentials for Core S3AccessRole
+- Caches credentials in Lambda container (reused across invocations until 5 minutes before expiration)
 - Parses EventBridge events from SQS message body
-- Reads files from `input/` prefix in Core Account's bucket
+- Reads files from `input/` prefix in Core Account's bucket using assumed role credentials
 - Processes content (adds metadata header)
-- Writes to `output/` prefix with metadata
+- Writes to `output/` prefix with metadata using assumed role credentials
 - Returns `batchItemFailures` for partial batch failures (SQS reprocessing)
 
 ### Tests (test/)
@@ -95,43 +103,81 @@ npx projen             # Regenerate project files from .projenrc.ts
 - Three test scenarios:
   1. `eventbridge-cross-account.test.ts`: Tests event routing from Core Account to RPS Account
   2. `eventbridge-sqs.test.ts`: Tests EventBridge to SQS queue delivery in RPS Account
-  3. `lambda-s3-operations.test.ts`: Tests Lambda reading from input/ and writing to output/
+  3. `lambda-s3-operations.test.ts`: Tests Lambda reading from input bucket and writing to output bucket
 
 ## Important Implementation Details
 
-### Cross-Account IAM Trust
+### Cross-Account Access with AssumeRole Pattern
 
-The Lambda IAM role must have a **specific, predictable name** because the S3 bucket policy in Core Account explicitly trusts:
+This project uses the **AssumeRole pattern** for cross-account S3 access, which centralizes all S3/KMS permissions in the Core account.
+
+**Architecture:**
+1. **Core Account** creates `S3AccessRole` with:
+   - Trust policy allowing specific RPS Lambda roles to assume it
+   - All S3 read (`input/*`) and write (`output/*`) permissions
+   - All KMS encrypt/decrypt permissions
+
+2. **RPS Account** Lambda role has:
+   - ONLY `sts:AssumeRole` permission for Core S3AccessRole
+   - NO direct S3 or KMS permissions
+
+3. **Lambda runtime**:
+   - Calls STS AssumeRole to get temporary credentials (1-hour validity)
+   - Caches credentials in container global scope (reused across warm invocations)
+   - Uses credentials with 5-minute expiration buffer
+
+**Trust Policy Restriction:**
+
+The Lambda IAM role must have a **specific, predictable name** because the Core S3AccessRole trust policy uses StringLike condition:
+
 ```typescript
-`arn:aws:iam::${accountRpsId}:role/${prefix}-processor-lambda-role`
+// Dev environment - allows multiple developer deployments
+Condition: {
+  StringLike: {
+    'aws:PrincipalArn': [
+      `arn:aws:iam::${accountRpsId}:role/${prefix}-processor-lambda-role`,
+      `arn:aws:iam::${accountRpsId}:role/${prefix}-*-processor-lambda-role`
+    ]
+  }
+}
 ```
 
 This is set in `src/stack-rps.ts` via:
 ```typescript
 roleName: `${prefix}-processor-lambda-role`
+// OR for deployment-specific: `${prefix}-${deploymentPrefix}-processor-lambda-role`
 ```
+
+**Why AssumeRole instead of direct cross-account?**
+- ✅ Centralized permission management in Core account
+- ✅ Temporary credentials (auto-expiring)
+- ✅ No complex cross-account bucket/KMS policies
+- ✅ Clear audit trail (CloudTrail shows AssumeRole calls)
+- ✅ Single point of control for security team
 
 ### CDK NAG Suppressions
 
 CDK NAG checks are automatically applied during build. Suppressions are justified and documented:
 
-- **Core Stack**: BucketNotificationsHandler Lambda uses AWS-managed policy (stack suppression)
+- **Core Stack**:
+  - BucketNotificationsHandler Lambda uses AWS-managed policy (stack suppression)
+  - S3AccessRole wildcard S3 permissions for prefix-based access (resource suppression with regex)
+  - S3AccessRole wildcard KMS permissions for S3 encryption operations (resource suppression)
 - **RPS Stack**:
   - Lambda role uses AWS-managed policy for CloudWatch Logs (resource suppression)
-  - Wildcard S3 permissions for prefix patterns (stack suppression with regex)
-  - Lambda runtime version check (resource suppression - Node.js 20 is latest LTS)
+  - Lambda runtime version check (resource suppression - Node.js 22 is latest LTS)
 
 Suppressions use **regex patterns** for S3 ARNs to handle dynamic bucket names:
 ```typescript
 appliesTo: [
-  { regex: '/^Resource::arn:aws:s3:::.*/input/\\*$/g' },
-  { regex: '/^Resource::arn:aws:s3:::.*/output/\\*$/g' },
+  { regex: '/Resource::<Bucket.*\\.Arn>/input/\\*/g' },
+  { regex: '/Resource::<Bucket.*\\.Arn>/output/\\*/g' },
 ]
 ```
 
 ### EventBridge Event Flow
 
-1. S3 emits `Object Created` event to EventBridge when file uploaded to `input/`
+1. Input S3 bucket emits `Object Created` event to EventBridge when file uploaded
 2. EventBridge rule in Core Account matches and sends to RPS Account's EventBridge
 3. EventBridge rule in RPS Account matches events from Core Account and sends to SQS
 4. SQS triggers Lambda via event source mapping
@@ -146,14 +192,22 @@ SQSRecord.body → EventBridgeEvent → detail → { bucket, object, request-id 
 
 All resources follow consistent naming patterns for multi-instance support:
 
+**Core Account:**
 - S3 Bucket: `{prefix}-core-test-bucket-{accountId}-{region}`
 - Access Logs Bucket: `{prefix}-core-test-access-logs-{accountId}-{region}`
-- SQS Queue: `{prefix}-processor-queue`
-- DLQ: `{prefix}-processor-dlq`
-- Lambda: `{prefix}-s3-processor`
-- IAM Role: `{prefix}-processor-lambda-role`
-- EventBridge Rule (Core): `{prefix}-s3-input-events`
-- EventBridge Rule (RPS): `{prefix}-receive-s3-events`
+- KMS Key: `alias/{prefix}-bucket-key`
+- S3 Access Role: `{prefix}-s3-access-role`
+- EventBridge Role: `{prefix}-cross-account-eventbridge-role`
+- EventBridge Rule: `{prefix}-s3-input-events`
+
+**RPS Account:**
+- SQS Queue: `{prefix}-processor-queue` (or `{prefix}-{deploymentPrefix}-processor-queue`)
+- DLQ: `{prefix}-processor-dlq` (or `{prefix}-{deploymentPrefix}-processor-dlq`)
+- KMS Key: `{prefix}-queue-key` (or `{prefix}-{deploymentPrefix}-queue-key`)
+- Lambda: `{prefix}-s3-processor` (or `{prefix}-{deploymentPrefix}-s3-processor`)
+- Lambda Role: `{prefix}-processor-lambda-role` (or `{prefix}-{deploymentPrefix}-processor-lambda-role`)
+- EventBridge Rule: `{prefix}-receive-s3-events` (or `{prefix}-{deploymentPrefix}-receive-s3-events`)
+- Custom Event Bus: `{prefix}-cross-account-bus` (shared across deployments)
 
 ## Modifying the Project
 
@@ -180,12 +234,22 @@ Or update the default values in `src/main.ts` lines 15-19.
 
 ### Adding New IAM Permissions
 
-When adding permissions to Lambda:
+**For cross-account S3/KMS access:**
+
+All S3 and KMS permissions are centralized in Core account's S3AccessRole. To modify:
+
+1. Edit `src/stack-core.ts` - modify S3AccessRole permissions
+2. Use `bucket.grantRead()`, `bucket.grantWrite()`, or `bucketKey.grant*()` methods
+3. Add CDK NAG suppression if using wildcards (with regex patterns)
+4. Document reason for permissions
+
+**For same-account permissions (SQS, CloudWatch, etc.):**
 
 1. Add policy statement in `src/stack-rps.ts` to `lambdaRole.addToPolicy()`
 2. Add corresponding CDK NAG suppression if using wildcards
-3. Update bucket policy in `src/stack-core.ts` if cross-account S3 access needed
-4. Document reason for permissions
+3. Document reason for permissions
+
+**Note:** Lambda role in RPS account should ONLY have `sts:AssumeRole` permission for cross-account access. Do not add direct S3/KMS permissions.
 
 ### Updating Dependencies
 
@@ -258,7 +322,7 @@ This happens when using `NagSuppressions.addResourceSuppressionsByPath()` before
 
 ### CDK NAG IAM5 wildcard errors
 
-For S3 prefix patterns (`bucket/input/*`), wildcards are necessary. Use regex patterns in stack suppressions:
+For S3 bucket access patterns, wildcards are necessary. Use regex patterns in stack suppressions:
 ```typescript
 NagSuppressions.addStackSuppressions(this, [{
   id: 'AwsSolutions-IAM5',
@@ -269,11 +333,21 @@ NagSuppressions.addStackSuppressions(this, [{
 
 ### Lambda can't access S3
 
-Check these in order:
-1. Bucket policy in Core Stack includes correct Lambda role ARN
-2. KMS key policy grants RPS Account decrypt via S3 service
-3. Lambda role has S3 permissions in RPS Stack
-4. Accessing correct prefixes (input/ for read, output/ for write)
+With the AssumeRole pattern, check these in order:
+
+1. **AssumeRole permission**: Lambda role has `sts:AssumeRole` permission for Core S3AccessRole ARN
+2. **Trust policy**: Core S3AccessRole trust policy allows Lambda role (check StringLike condition)
+3. **S3AccessRole permissions**: S3AccessRole has S3 read/write permissions in Core Stack
+4. **KMS permissions**: S3AccessRole has KMS decrypt/encrypt permissions in Core Stack
+5. **Environment variable**: Lambda has `CORE_S3_ACCESS_ROLE_ARN` environment variable set correctly
+6. **Credential caching**: Check CloudWatch logs for "Assuming role" or "Using cached credentials" messages
+7. **Buckets**: Accessing correct buckets (input bucket for read, output bucket for write)
+
+**Common errors:**
+- `AccessDenied` on AssumeRole: Trust policy doesn't allow Lambda role (check StringLike pattern)
+- `AccessDenied` on S3: S3AccessRole doesn't have required S3 permissions
+- `KMS.NotFoundException`: S3AccessRole doesn't have KMS permissions
+- No credentials cached: AssumeRole is being called every invocation (check expiration logic)
 
 ### Events not flowing cross-account
 

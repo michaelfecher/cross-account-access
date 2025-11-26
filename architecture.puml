@@ -1,0 +1,479 @@
+@startuml Cross-Account Architecture
+
+skinparam componentStyle rectangle
+skinparam backgroundColor white
+skinparam shadowing false
+
+title Cross-Account Access Infrastructure (AssumeRole Pattern)\n(STAGE=dev, CDK_DEPLOYMENT_PREFIX={optional})
+
+' Core Account
+rectangle "Core Account (111111111111)" #F3E5F5 {
+
+  rectangle "[KMS]\nBucket Key\nalias/dev-bucket-key\n(shared key)" as CoreKMS #E1F5FE
+  rectangle "[S3]\nAccess Logs\ndev-core-test-access-logs-*" as AccessLogs #E1F5FE
+  rectangle "[S3]\nInput Bucket\ndev-core-input-bucket-*\n(triggers events)" as InputBucket #E1F5FE
+  rectangle "[S3]\nOutput Bucket\ndev-core-output-bucket-*\n(receives results)" as OutputBucket #E1F5FE
+  rectangle "[IAM]\nS3 Access Role\ndev-s3-access-role\n(ALL S3/KMS permissions)" as CoreS3Role #FFF3E0
+  rectangle "[EB]\nS3 Input Events\ndev-s3-input-events" as CoreRule
+  rectangle "[IAM]\nCross-Account Role\ndev-cross-account-eventbridge-role" as CoreRole
+}
+
+' RPS Account
+rectangle "RPS Account (222222222222)" #E8F5E9 {
+
+  ' Shared Resource
+  rectangle "[EB]\nCustom Event Bus\ndev-cross-account-bus\n(shared across deployments)" as CustomBus
+
+  ' Regular Dev Stack (no CDK_DEPLOYMENT_PREFIX)
+  package "Regular Dev Stack" #FFFFFF {
+    rectangle "[KMS]\nQueue Key\ndev-queue-key" as RpsKMS1 #E1F5FE
+    rectangle "[EB]\nReceive S3 Events\ndev-receive-s3-events\n(filters input bucket)" as RpsRule1
+    rectangle "[SQS]\nProcessor Queue\ndev-processor-queue" as Queue1 #E1F5FE
+    rectangle "[SQS]\nDLQ\ndev-processor-dlq" as DLQ1 #E1F5FE
+    rectangle "[λ]\nS3 Processor\ndev-s3-processor\n(1. AssumeRole\n2. Process files)" as Lambda1
+    rectangle "[IAM]\nLambda Role\ndev-processor-lambda-role\n(sts:AssumeRole only)" as Role1
+  }
+
+  ' John's Stack (CDK_DEPLOYMENT_PREFIX=john)
+  package "John's Deployment" #FFFFFF {
+    rectangle "[KMS]\nQueue Key\ndev-john-queue-key" as RpsKMS2 #E1F5FE
+    rectangle "[EB]\nReceive S3 Events\ndev-john-receive-s3-events\n(filters input bucket)" as RpsRule2
+    rectangle "[SQS]\nProcessor Queue\ndev-john-processor-queue" as Queue2 #E1F5FE
+    rectangle "[SQS]\nDLQ\ndev-john-processor-dlq" as DLQ2 #E1F5FE
+    rectangle "[λ]\nS3 Processor\ndev-john-s3-processor\n(1. AssumeRole\n2. Process files)" as Lambda2
+    rectangle "[IAM]\nLambda Role\ndev-john-processor-lambda-role\n(sts:AssumeRole only)" as Role2
+  }
+}
+
+' Core Account Relationships
+CoreKMS -down-> InputBucket : encrypts
+CoreKMS -down-> OutputBucket : encrypts
+InputBucket -right-> AccessLogs : logs to
+OutputBucket -right-> AccessLogs : logs to
+InputBucket -down-> CoreRule : emits events
+CoreRule -down-> CoreRole : uses
+CoreRole -down-> CustomBus : PutEvents\n(cross-account)
+CoreS3Role -up-> InputBucket : reads entire bucket\n(same account)
+CoreS3Role -up-> OutputBucket : writes entire bucket\n(same account)
+CoreS3Role -up-> CoreKMS : decrypt/encrypt\n(same account)
+
+' Regular Dev Stack Relationships
+CustomBus -down-> RpsRule1 : triggers
+RpsRule1 -down-> Queue1 : sends events
+Queue1 -right-> DLQ1 : failed msgs
+Queue1 -down-> Lambda1 : triggers
+Lambda1 -down-> Role1 : uses
+Role1 .up.> CoreS3Role : sts:AssumeRole\n(gets temp creds)
+Lambda1 .up.> CoreS3Role : uses temp creds\nfor S3/KMS
+RpsKMS1 -right-> Queue1 : encrypts
+RpsKMS1 -right-> DLQ1 : encrypts
+
+' John's Stack Relationships
+CustomBus -down-> RpsRule2 : triggers
+RpsRule2 -down-> Queue2 : sends events
+Queue2 -right-> DLQ2 : failed msgs
+Queue2 -down-> Lambda2 : triggers
+Lambda2 -down-> Role2 : uses
+Role2 .up.> CoreS3Role : sts:AssumeRole\n(gets temp creds)
+Lambda2 .up.> CoreS3Role : uses temp creds\nfor S3/KMS
+RpsKMS2 -right-> Queue2 : encrypts
+RpsKMS2 -right-> DLQ2 : encrypts
+
+legend right
+  |= Icon |= Resource Type |
+  | [S3] | S3 Bucket |
+  | [EB] | EventBridge Rule/Bus |
+  | [SQS] | SQS Queue |
+  | [λ] | Lambda Function |
+  | [KMS] | KMS Key |
+  | [IAM] | IAM Role |
+
+  |= Color |= Meaning |
+  | <back:#F3E5F5>   </back> | Core Account |
+  | <back:#E8F5E9>   </back> | RPS Account |
+  | <back:#E1F5FE>   </back> | Dev: DESTROY policy |
+  | <back:#FFF3E0>   </back> | Centralized Access Role |
+
+  **Arrow Types:**
+  ──── = Direct relationship
+  ····> = AssumeRole / Temp credentials
+
+  **Policy Legend:**
+  🔐 = Trust/Assume Policy
+  📜 = Resource Policy
+  🔑 = Permissions Policy
+endlegend
+
+note bottom of CustomBus
+  Shared Event Bus created via
+  Custom Resource (idempotent)
+  Reused by all deployments
+end note
+
+note bottom of Lambda1
+  Lambda Flow:
+  1. Assume Core S3AccessRole
+  2. Get temporary credentials (1h)
+  3. Cache credentials
+  4. Use for ALL S3/KMS operations
+
+  Reads from: Input Bucket
+  Writes to: Output Bucket
+  Same key in both buckets
+end note
+
+note bottom of Lambda2
+  Lambda Flow:
+  1. Assume Core S3AccessRole
+  2. Get temporary credentials (1h)
+  3. Cache credentials
+  4. Use for ALL S3/KMS operations
+
+  Reads from: Input Bucket
+  Writes to: Output Bucket
+  Same key in both buckets
+end note
+
+' ========================================
+' DETAILED POLICY EXPLANATIONS
+' ========================================
+
+note right of CoreS3Role
+  **🔐 TRUST POLICY (S3AccessRole)**
+  ===================================
+
+  **Who can assume this role?**
+
+  **Dev Environment:**
+  Principal: arn:aws:iam::222222222222:root
+  Condition:
+    StringLike:
+      aws:PrincipalArn:
+        - arn:aws:iam::222222222222:role/dev-processor-lambda-role
+        - arn:aws:iam::222222222222:role/dev-*-processor-lambda-role
+
+  ✅ Allows: dev-processor-lambda-role
+  ✅ Allows: dev-john-processor-lambda-role
+  ✅ Allows: dev-alice-processor-lambda-role
+  ❌ Denies: dev-admin-role
+  ❌ Denies: Any other role
+
+  **Prod Environment:**
+  Principal: arn:aws:iam::222222222222:role/prod-processor-lambda-role
+
+  ✅ Allows: ONLY prod-processor-lambda-role
+  ❌ Denies: All other roles
+
+  **🔑 PERMISSIONS POLICY**
+  ========================
+
+  **S3 Read (Input Bucket):**
+  - s3:GetObject*, s3:GetBucket*, s3:List*
+  - Resources: input-bucket, input-bucket/*
+
+  **S3 Write (Output Bucket):**
+  - s3:PutObject, s3:DeleteObject*, s3:Abort*
+  - Resources: output-bucket/*
+
+  **KMS:**
+  - kms:Decrypt, kms:Encrypt, kms:GenerateDataKey*
+  - Resource: Shared bucket KMS key
+
+  **Key Point:**
+  ALL S3 and KMS permissions are in THIS role
+  in the CORE account. RPS Lambda only needs
+  sts:AssumeRole permission.
+end note
+
+note right of InputBucket
+  **📜 S3 BUCKET POLICIES (Defense in Depth)**
+  ============================================
+
+  **Both input and output buckets have:**
+
+  Statement 1: Deny Public Access
+  Sid: DenyPublicAccess
+  Effect: DENY
+  Principal: *
+  Actions: s3:*
+  Resources: bucket + bucket/*
+  Conditions:
+    • aws:PrincipalIsAWSService = false
+    • aws:PrincipalAccount NOT IN [111111111111]
+
+  **No Cross-Account ALLOW Statements!**
+
+  The S3AccessRole is in the SAME account
+  as both buckets, so no bucket policy needed
+  for access. The role's permissions policy
+  is sufficient.
+
+  This is MUCH simpler than cross-account
+  bucket policies!
+end note
+
+note left of CoreKMS
+  **📜 KMS KEY POLICY (Same Account)**
+  ====================================
+
+  The KMS key policy allows the Core account.
+
+  **No Cross-Account KMS Policy Needed!**
+
+  When RPS Lambda assumes the S3AccessRole:
+  1. Lambda gets temporary credentials
+  2. Those credentials belong to CORE account
+  3. KMS sees requests from CORE account
+  4. Same-account access = straightforward
+
+  Previously:
+  ❌ Complex cross-account KMS policy
+  ❌ kms:ViaService condition needed
+  ❌ Permissions split across accounts
+
+  Now:
+  ✅ Simple same-account policy
+  ✅ No special conditions needed
+  ✅ Centralized in Core account
+end note
+
+note left of CoreRole
+  **🔐 TRUST POLICY**
+  Principal: events.amazonaws.com
+
+  **🔑 PERMISSIONS POLICY**
+  Effect: ALLOW
+  Actions: events:PutEvents
+  Resources:
+    arn:aws:events:eu-central-1:222222222222:
+      event-bus/dev-cross-account-bus
+
+  This role allows Core Account EventBridge
+  to deliver events to RPS Account event bus.
+end note
+
+note right of CustomBus
+  **📜 EVENT BUS POLICY (RPS Account)**
+  ====================================
+
+  **Allow Core Account to Send Events**
+
+  Created via Custom Resource with permissions:
+
+  For regular dev stack:
+    StatementId: AllowCoreAccount-dev
+    Principal: 111111111111
+    Action: events:PutEvents
+
+  For deployment-specific stacks:
+    StatementId: AllowCoreAccount-dev-john
+    Principal: 111111111111
+    Action: events:PutEvents
+
+  ⚠️ Each deployment gets UNIQUE StatementId
+  to prevent conflicts when multiple stacks
+  share the same event bus.
+end note
+
+note left of Role1
+  **🔐 TRUST POLICY**
+  Principal: lambda.amazonaws.com
+
+  **🔑 PERMISSIONS POLICY**
+  ========================
+
+  **Cross-Account Access (SIMPLIFIED!):**
+  Sid: AssumeCoreS3AccessRole
+  Effect: ALLOW
+  Action: sts:AssumeRole
+  Resource: arn:aws:iam::111111111111:role/dev-s3-access-role
+
+  ✅ This is the ONLY cross-account permission!
+  ✅ No direct S3 permissions
+  ✅ No direct KMS permissions
+  ✅ Much simpler than before
+
+  **Same-Account SQS Access:**
+  Effect: ALLOW
+  Actions:
+    • sqs:ReceiveMessage
+    • sqs:DeleteMessage
+    • sqs:GetQueueAttributes
+  Resources:
+    • arn:aws:sqs:...:dev-processor-queue
+
+  **Same-Account KMS for SQS:**
+  Effect: ALLOW
+  Actions:
+    • kms:Decrypt
+  Resources:
+    • arn:aws:kms:...:key/dev-queue-key
+
+  **CloudWatch Logs:**
+  Effect: ALLOW
+  Actions:
+    • logs:CreateLogGroup
+    • logs:CreateLogStream
+    • logs:PutLogEvents
+  Resources: arn:aws:logs:...:*
+end note
+
+note bottom of Role2
+  **Same as Role1**
+
+  AssumeRole Resource:
+    arn:aws:iam::111111111111:role/dev-s3-access-role
+
+  SQS Resources:
+    • arn:aws:sqs:...:dev-john-processor-queue
+
+  KMS Resources:
+    • arn:aws:kms:...:key/dev-john-queue-key
+end note
+
+note top of RpsRule1
+  **NO EXPLICIT PERMISSION NEEDED**
+
+  EventBridge rules don't require explicit
+  permission to receive events on the same
+  event bus within the same account.
+
+  The permission is on the **event bus**
+  (see CustomBus policy) that allows
+  Core Account to send events.
+end note
+
+note as AssumeRoleFlow
+  **🔒 ASSUMEROLE SECURITY FLOW**
+  ================================
+
+  **Step 1: Lambda calls sts:AssumeRole**
+    Lambda: I want to assume dev-s3-access-role
+    ↓
+
+  **Step 2: STS checks Lambda role permissions**
+    ✓ Does Lambda role have sts:AssumeRole? YES
+    ✓ Resource matches Core S3AccessRole? YES
+    → Permission check PASSED
+    ↓
+
+  **Step 3: STS checks Core S3AccessRole trust policy**
+    ✓ Is caller from account 222222222222? YES
+    ✓ Does ARN match StringLike pattern? YES
+       (dev-*-processor-lambda-role)
+    → Trust check PASSED
+    ↓
+
+  **Step 4: STS returns temporary credentials**
+    AccessKeyId: ASIA... (temp)
+    SecretAccessKey: ... (temp)
+    SessionToken: ... (temp)
+    Expiration: +1 hour
+    ↓
+
+  **Step 5: Lambda caches credentials**
+    Cache duration: Until 5 min before expiration
+    Reused across invocations (container reuse)
+    ↓
+
+  **Step 6: Lambda uses temp credentials for S3**
+    s3Client = new S3Client({ credentials: tempCreds })
+    s3Client.getObject({ Bucket, Key })
+    ↓
+
+  **Step 7: S3 sees Core account identity**
+    Principal: arn:aws:sts::111111111111:assumed-role/dev-s3-access-role/...
+    ✓ Same-account access
+    ✓ S3AccessRole has s3:GetObject permission
+    → ALLOW
+    ↓
+
+  **Step 8: S3 calls KMS to decrypt**
+    ✓ Same-account access
+    ✓ S3AccessRole has kms:Decrypt permission
+    → ALLOW
+end note
+
+note as PolicySummary
+  **🔒 SECURITY ARCHITECTURE SUMMARY (AssumeRole Pattern)**
+  =========================================================
+
+  **1. Defense in Depth (3 Layers):**
+     Layer 1: Core S3AccessRole Trust Policy
+       → Restricts WHO can assume (StringLike condition)
+     Layer 2: RPS Lambda Role Permissions
+       → Must have explicit sts:AssumeRole permission
+     Layer 3: Core S3AccessRole Permissions
+       → Defines WHAT can be accessed
+
+  **2. Centralized Permission Management:**
+     Core Account:
+       ├─ S3AccessRole trust policy (controls WHO)
+       └─ S3AccessRole permissions (controls WHAT)
+           ├─ ALL S3 permissions
+           └─ ALL KMS permissions
+
+     RPS Account:
+       └─ Lambda role has ONLY sts:AssumeRole
+
+     Benefits:
+       ✅ Single place to manage S3/KMS access
+       ✅ Single place to audit
+       ✅ Clear security boundary (AssumeRole)
+       ✅ Core maintains full control
+
+  **3. Temporary Credentials:**
+     ✅ Auto-expiring (1 hour max)
+     ✅ No permanent keys
+     ✅ Cached for performance
+     ✅ CloudTrail logs all AssumeRole operations
+
+  **4. Environment-Based Security:**
+     • **Dev**: StringLike condition allows multiple developers
+       Allows: dev-*, dev-john-*, dev-sally-*
+       Pattern: dev-*-processor-lambda-role
+
+     • **Prod**: Specific ARN only
+       Allows: ONLY prod-processor-lambda-role
+       No wildcards, maximum security
+
+  **5. Least Privilege:**
+     S3AccessRole:
+       ✅ Read: ONLY entire input bucket
+       ✅ Write: ONLY entire output bucket
+       ❌ No bucket config changes
+       ❌ No delete from input bucket
+
+     Lambda Role:
+       ✅ ONLY sts:AssumeRole (cross-account)
+       ❌ NO direct S3 access
+       ❌ NO direct KMS access
+
+  **6. Audit Trail (CloudTrail):**
+     AssumeRole events show:
+       • Which Lambda role assumed which Core role
+       • When credentials were issued
+       • When they expire
+
+     S3/KMS events show:
+       • Operations performed with assumed role identity
+       • Clear chain: Lambda → AssumeRole → S3/KMS
+
+  **7. Comparison with Previous Pattern:**
+     OLD (Direct cross-account):
+       ❌ S3 bucket policy allows RPS
+       ❌ KMS key policy allows RPS
+       ❌ Permissions split across accounts
+       ❌ Complex kms:ViaService conditions
+       ❌ Harder to audit
+
+     NEW (AssumeRole):
+       ✅ No cross-account bucket policy needed
+       ✅ No cross-account KMS policy needed
+       ✅ Permissions centralized in Core
+       ✅ Simple same-account access
+       ✅ Clear audit trail
+       ✅ Temporary credentials
+end note
+
+@enduml

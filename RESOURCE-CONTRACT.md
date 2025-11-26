@@ -23,56 +23,101 @@ All resources follow the pattern: `{prefix}-{resource-type}-{identifiers}`
 
 ## Core Team Resources (Stack Core)
 
-### S3 Bucket
+### Input S3 Bucket
 
-**Name:** `{prefix}-core-test-bucket-{accountCoreId}-{region}`
+**Name:** `{prefix}-core-input-bucket-{accountCoreId}-{region}`
 
-**Example:** `alice-core-test-bucket-111111111111-eu-west-1`
+**Example:** `alice-core-input-bucket-111111111111-eu-west-1`
 
-**Purpose:** Stores input files (prefix: `input/`) and output files (prefix: `output/`)
+**Purpose:** Receives files to be processed, triggers EventBridge notifications
 
-**Required Permissions:**
-- RPS Lambda must read from `s3://{bucketName}/input/*`
-- RPS Lambda must write to `s3://{bucketName}/output/*`
+### Output S3 Bucket
 
-**Bucket Policy Requirements:**
+**Name:** `{prefix}-core-output-bucket-{accountCoreId}-{region}`
+
+**Example:** `alice-core-output-bucket-111111111111-eu-west-1`
+
+**Purpose:** Stores processed files written by RPS Lambda
+
+**Access Pattern:** Cross-account access via AssumeRole (NOT direct bucket policy)
+- RPS Lambda assumes Core S3AccessRole to get temporary credentials
+- S3AccessRole has read access to entire input bucket
+- S3AccessRole has write access to entire output bucket
+
+**Bucket Policies:** Defense in depth only (denies public access)
+
+Both buckets have the same policy:
 ```json
 {
-  "Effect": "Allow",
-  "Principal": {
-    "AWS": "arn:aws:iam::{accountRpsId}:role/{prefix}-processor-lambda-role"
-  },
-  "Action": ["s3:GetObject", "s3:ListBucket"],
+  "Sid": "DenyPublicAccess",
+  "Effect": "Deny",
+  "Principal": "*",
+  "Action": "s3:*",
   "Resource": [
     "arn:aws:s3:::{bucketName}",
-    "arn:aws:s3:::{bucketName}/input/*"
-  ]
+    "arn:aws:s3:::{bucketName}/*"
+  ],
+  "Condition": {
+    "Bool": {
+      "aws:PrincipalIsAWSService": "false"
+    },
+    "StringNotEquals": {
+      "aws:PrincipalAccount": ["{accountCoreId}"]
+    }
+  }
 }
 ```
 
 ### KMS Key
 
+**Alias:** `alias/{prefix}-bucket-key`
+
 **Purpose:** Encrypts S3 bucket
 
-**Required Permissions:**
+**Access Pattern:** Same-account access only (via S3AccessRole)
+- S3AccessRole in Core account has KMS permissions
+- When RPS Lambda assumes S3AccessRole, it uses Core account credentials
+- KMS sees requests from Core account (same-account access)
+
+**No Cross-Account KMS Policy Needed!**
+
+The KMS key policy only needs to allow the Core account. Since S3AccessRole is in the same account, no special cross-account policy is required.
+
+### S3AccessRole (IAM Role)
+
+**Name:** `{prefix}-s3-access-role`
+
+**Example:** `alice-s3-access-role`
+
+**Purpose:** Centralized IAM role that RPS Lambda assumes to access S3/KMS resources
+
+**Trust Policy:**
 ```json
 {
   "Effect": "Allow",
   "Principal": {
     "AWS": "arn:aws:iam::{accountRpsId}:root"
   },
-  "Action": [
-    "kms:Decrypt",
-    "kms:DescribeKey",
-    "kms:GenerateDataKey"
-  ],
+  "Action": "sts:AssumeRole",
   "Condition": {
-    "StringEquals": {
-      "kms:ViaService": "s3.{region}.amazonaws.com"
+    "StringLike": {
+      "aws:PrincipalArn": [
+        "arn:aws:iam::{accountRpsId}:role/{prefix}-processor-lambda-role",
+        "arn:aws:iam::{accountRpsId}:role/{prefix}-*-processor-lambda-role"
+      ]
     }
   }
 }
 ```
+
+**Note:** The StringLike condition restricts which roles can assume this role. Only roles matching the pattern `{prefix}-processor-lambda-role` or `{prefix}-*-processor-lambda-role` are allowed.
+
+**Permissions Policy:**
+- S3 read: `s3:GetObject*`, `s3:GetBucket*`, `s3:List*` on entire input bucket
+- S3 write: `s3:PutObject`, `s3:DeleteObject*`, `s3:Abort*` on entire output bucket
+- KMS: `kms:Decrypt`, `kms:Encrypt`, `kms:GenerateDataKey*` on shared bucket KMS key
+
+**Session Duration:** 1 hour (credentials cached by Lambda)
 
 ### EventBridge Rule
 
@@ -89,10 +134,7 @@ All resources follow the pattern: `{prefix}-{resource-type}-{identifiers}`
   "detail-type": ["Object Created"],
   "detail": {
     "bucket": {
-      "name": ["{bucketName}"]
-    },
-    "object": {
-      "key": [{"prefix": "input/"}]
+      "name": ["{inputBucketName}"]
     }
   }
 }
@@ -110,7 +152,24 @@ All resources follow the pattern: `{prefix}-{resource-type}-{identifiers}`
 
 **Purpose:** Processes files from Core S3
 
-**Required IAM Role Name:** `{prefix}-processor-lambda-role` (MUST match - used in Core bucket policy)
+**Required IAM Role Name:** `{prefix}-processor-lambda-role` (MUST match - used in Core S3AccessRole trust policy)
+
+**Cross-Account Access Pattern:**
+1. Lambda calls STS AssumeRole for `arn:aws:iam::{accountCoreId}:role/{prefix}-s3-access-role`
+2. Receives temporary credentials (valid for 1 hour)
+3. Caches credentials in container (reused across invocations)
+4. Uses credentials for all S3/KMS operations
+
+**Required IAM Permissions (RPS Lambda Role):**
+- Cross-account: `sts:AssumeRole` for Core S3AccessRole ARN
+- Same-account: SQS, CloudWatch Logs permissions
+- **NO direct S3 or KMS permissions needed** (all in Core S3AccessRole)
+
+**Environment Variables:**
+- `CORE_S3_ACCESS_ROLE_ARN`: ARN of Core S3AccessRole to assume
+- `INPUT_BUCKET_NAME`: Core input S3 bucket name
+- `OUTPUT_BUCKET_NAME`: Core output S3 bucket name
+- `PREFIX`: Deployment prefix
 
 ### SQS Queue
 
@@ -174,12 +233,14 @@ For shared environments:
 ### In Code (src/main.ts)
 
 ```typescript
-// Construct Core bucket name using the contract
-const stackCoreBucketName = `${prefix}-core-test-bucket-${accountCoreId}-${region}`;
+// Construct Core bucket names using the contract
+const stackCoreInputBucketName = `${prefix}-core-input-bucket-${accountCoreId}-${region}`;
+const stackCoreOutputBucketName = `${prefix}-core-output-bucket-${accountCoreId}-${region}`;
 
 // Pass to RPS stack
 const stackRps = new StackRps(app, `${prefix}-StackRps`, {
-  stackCoreBucketName, // Static string - no cross-account reference
+  stackCoreInputBucketName, // Static string - no cross-account reference
+  stackCoreOutputBucketName, // Static string - no cross-account reference
   // ...
 });
 ```
@@ -199,19 +260,26 @@ Before deploying, verify:
 
 ### Core Team Checklist
 
-- [ ] S3 bucket name follows: `{prefix}-core-test-bucket-{accountCoreId}-{region}`
-- [ ] Bucket policy allows RPS Lambda role: `{prefix}-processor-lambda-role`
-- [ ] KMS key policy allows RPS account: `{accountRpsId}`
-- [ ] EventBridge rule targets RPS event bus
+- [ ] Input bucket name follows: `{prefix}-core-input-bucket-{accountCoreId}-{region}`
+- [ ] Output bucket name follows: `{prefix}-core-output-bucket-{accountCoreId}-{region}`
+- [ ] S3AccessRole name is exactly: `{prefix}-s3-access-role`
+- [ ] S3AccessRole trust policy uses StringLike condition to restrict RPS Lambda roles
+- [ ] S3AccessRole has S3 read permissions for entire input bucket
+- [ ] S3AccessRole has S3 write permissions for entire output bucket
+- [ ] S3AccessRole has KMS decrypt/encrypt permissions
+- [ ] EventBridge rule targets RPS custom event bus
+- [ ] EventBridge rule filters by input bucket name
 - [ ] EventBridge IAM role has `events:PutEvents` permission
 
 ### RPS Team Checklist
 
-- [ ] Lambda role name is exactly: `{prefix}-processor-lambda-role` (matches Core bucket policy)
-- [ ] Lambda has permissions for S3 operations
-- [ ] Lambda has KMS permissions: Decrypt, DescribeKey, GenerateDataKey
-- [ ] EventBridge rule filters by Core account ID
-- [ ] Event bus policy allows Core account to put events
+- [ ] Lambda role name is exactly: `{prefix}-processor-lambda-role` (matches Core S3AccessRole trust policy)
+- [ ] Lambda role has `sts:AssumeRole` permission for Core S3AccessRole ARN
+- [ ] Lambda has NO direct S3 or KMS permissions (uses AssumeRole instead)
+- [ ] Lambda has `CORE_S3_ACCESS_ROLE_ARN`, `INPUT_BUCKET_NAME`, `OUTPUT_BUCKET_NAME` environment variables set
+- [ ] Lambda code implements AssumeRole credential caching
+- [ ] EventBridge rule filters by Core account ID and input bucket name
+- [ ] Custom event bus exists and allows Core account to put events
 
 ---
 
